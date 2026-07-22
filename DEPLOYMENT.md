@@ -28,7 +28,9 @@ conda activate vmem
 For the original CUDA/PyTorch setup:
 
 ```bash
-pip install -r requirements.txt
+pip install --extra-index-url https://download.pytorch.org/whl/nightly/cu124 torch==2.7.0 torchvision==0.22.0
+pip install -r requirements_no_torch_curope.txt
+pip install --no-build-isolation -e ./extern/CUT3R/src/croco/models/curope
 ```
 
 If PyTorch and the CUT3R `curope` extension are installed separately on the target server, install only the remaining Python packages:
