@@ -78,12 +78,25 @@
 - `surfel`, `recent`, `initial_only` context baseline
 - exact/novel-angle/partial-overlap revisit, rotation accumulation, revisit gap
 - `correct`, `none`, `wrong`, `correct_plus_wrong` memory intervention
+- wrong slot count/index와 latent, CLIP, pose/intrinsics component 분리 ablation
+- intervention 종료 후 오염 지속성을 확인하는 `contamination_followup`
+- 순차·재개 가능한 `scripts/run_revisit_matrix.py`와 cross-condition 후처리
 - surfel 후보 relevance와 pose distance, routing index와 실제 content source index 분리 기록
 - frame/context contact sheet, JSON/JSONL, CSV, manual-label manifest 저장
 
-이 기능은 논문의 새로운 memory architecture가 아니다. `wrong` 계열 intervention은 surfel이나 checkpoint를 손상시키지 않고 선택된 route pose/K는 유지한 채 latent와 CLIP embedding의 source만 다른 저장 frame으로 교체한다. 따라서 routing과 generation integration의 민감도를 분리하기 위한 실험 장치로만 해석해야 한다. 기본 앱 경로에서는 실험 모드가 비활성이고 기존 `surfel`/`correct` 동작을 유지한다.
+이 기능은 논문의 새로운 memory architecture가 아니다. `wrong` 계열 intervention은 surfel이나 checkpoint를 직접 손상시키지 않고 latent, CLIP 또는 pose/intrinsics source를 저장된 다른 frame으로 통제해 교체한다. 따라서 routing과 generation integration의 민감도를 분리하기 위한 실험 장치로만 해석해야 한다. 기본 앱 경로에서는 실험 모드가 비활성이고 기존 `surfel`/`correct` 동작을 유지한다.
 
 2026-07-23 최소 `living_room`, seed 42, forward 1회/return 1회 dry run에서는 correct memory가 30.44 dB였지만 strict wrong과 correct+wrong이 각각 22.20 dB, 22.13 dB였다. `recent`는 이 짧은 run에서 surfel과 같은 context를 골라 30.44 dB였고 `initial_only`는 30.54 dB였다. 모든 조건은 exact pose 복귀와 자동 rollout validity flag 0개를 기록했다. 이 결과는 한 장면·한 seed의 instrumentation 검증이며 일반화된 논문 성능 결론이 아니다. 상세 수치는 `failure_analysis.md`에만 기록한다.
+
+같은 날 추가한 57-run follow-up에서는 다음을 확인했다.
+
+- 2 scenes × 3 seeds 평균: correct 31.04 dB, wrong 14.07 dB, correct+wrong 14.05 dB
+- 한 latent slot만 바꿔도 효과가 포화됐고 CLIP-only 영향은 거의 없었음
+- movement-4 exact return: surfel 30.40 dB, revisit에서 memory off 18.81 dB, recent 20.94 dB
+- 동일 90도 final pose에서 generation call이 1→2→3→6으로 늘수록 수동 구조 붕괴가 심화
+- wrong revisit 후 intervention을 꺼도 follow-up exact return이 22 dB 수준으로 계속 오염됨
+
+일부 `open_door`와 rotation run에는 surfel fallback이 있었으며 `failure_analysis.md`는 전체 평균과 fallback-free subset을 분리한다. 생성 결과와 집계 JSON은 계속 `experiments/results/` 아래에만 두고 Git에 포함하지 않는다.
 
 ### 5. 배포 및 의존성 변경
 
@@ -93,7 +106,7 @@
 - 모델 가중치는 Git에 넣지 않고 Hugging Face에서 받아 로컬 cache에 저장한다.
 - PDF, runtime log, 생성 영상, 재방문 결과, checkpoint와 로컬 환경은 Git에서 제외한다.
 
-## 2026-07-22 현재 실행 상태
+## 2026-07-23 현재 실행 상태
 
 - GPU: NVIDIA H100 PCIe 80GB
 - Conda environment: `vmem`
