@@ -56,6 +56,42 @@ We provide a demo for you to interact with `VMem`. Simply run
 python app.py
 ```
 
+## Headless revisit experiments
+
+Spatial-memory revisit failures can be tested without Gradio. Start with a
+plan-only check, which does not load the model or use the GPU:
+
+```bash
+conda activate vmem
+python scripts/run_revisit_experiment.py \
+  --scene test_samples/living_room.jpg \
+  --context-mode surfel \
+  --trajectory exact_revisit \
+  --seed 42 \
+  --memory-intervention correct \
+  --plan-only \
+  --output-dir experiments/results/plan_only
+```
+
+Remove `--plan-only` for generation. The runner supports `surfel`, `recent`,
+and `initial_only` context modes; exact/novel-angle/partial-overlap, rotation
+accumulation, and revisit-gap trajectories; and `correct`, `none`, `wrong`, or
+`correct_plus_wrong` memory interventions. See all options with:
+
+```bash
+python scripts/run_revisit_experiment.py --help
+```
+
+Each run writes frames, an MP4, actual camera poses, strict JSON/JSONL memory
+traces, a summary CSV, context images, contact sheets, and a manual-label
+manifest below its `--output-dir`. Large outputs under `experiments/results/`
+are ignored by Git. The intervention is applied only during the revisit phase
+by default so outbound rollout and revisit conditioning can be separated.
+
+The paper/code comparison and experiment definitions are in
+[experiment_plan.md](experiment_plan.md). Only observations from completed
+local runs are recorded in [failure_analysis.md](failure_analysis.md).
+
 For moving this working tree to another server through GitHub, see [DEPLOYMENT.md](DEPLOYMENT.md).
 
 
