@@ -102,12 +102,21 @@ compete with itself for GPU memory:
 
 ```bash
 python scripts/run_revisit_matrix.py \
-  --groups dose components novel context rotation gap contamination repro \
+  --groups dose components novel partial context rotation gap contamination repro \
   --output-dir experiments/results/overnight
 ```
 
 It writes `matrix_summary.json` and `matrix_summary.csv` after every run and
 skips directories that already contain a completed `summary.json`.
+
+After the matrix completes, recompute all cross-condition statistics with:
+
+```bash
+python scripts/analyze_revisit_matrix.py \
+  --results-dir experiments/results/overnight
+```
+
+This writes `analysis.json` and `analysis.md` beside the ignored run outputs.
 
 Each run writes frames, an MP4, actual camera poses, strict JSON/JSONL memory
 traces, a summary CSV, context images, contact sheets, and a manual-label

@@ -14,6 +14,7 @@ GROUPS = (
     "dose",
     "components",
     "novel",
+    "partial",
     "context",
     "rotation",
     "gap",
@@ -100,6 +101,20 @@ def build_specs(groups: list[str], scenes: list[str], seeds: list[int]) -> list[
                     )
                 )
 
+    if "partial" in selected:
+        for intervention in ("correct", "wrong", "correct_plus_wrong"):
+            specs.append(
+                add_common(
+                    {
+                        "group": "partial",
+                        "run_id": f"partial_yaw45_{intervention}",
+                        "trajectory": "partial_overlap",
+                        "revisit_yaw_offset": 45,
+                        "memory_intervention": intervention,
+                    }
+                )
+            )
+
     if "context" in selected:
         for mode in ("surfel", "recent", "initial_only"):
             specs.append(
@@ -109,6 +124,42 @@ def build_specs(groups: list[str], scenes: list[str], seeds: list[int]) -> list[
                         "run_id": f"context_{mode}_movement4",
                         "context_mode": mode,
                         "movement_steps": 4,
+                    }
+                )
+            )
+        specs.append(
+            add_common(
+                {
+                    "group": "context",
+                    "run_id": "context_none_movement4",
+                    "context_mode": "surfel",
+                    "movement_steps": 4,
+                    "memory_intervention": "none",
+                }
+            )
+        )
+        for mode in ("recent", "initial_only"):
+            specs.append(
+                add_common(
+                    {
+                        "group": "context",
+                        "run_id": f"novel_context_{mode}_yaw20",
+                        "context_mode": mode,
+                        "trajectory": "novel_angle_revisit",
+                        "revisit_yaw_offset": 20,
+                    }
+                )
+            )
+        for mode in ("surfel", "recent", "initial_only"):
+            specs.append(
+                add_common(
+                    {
+                        "group": "context",
+                        "run_id": f"novel_context_{mode}_movement4_yaw20",
+                        "context_mode": mode,
+                        "trajectory": "novel_angle_revisit",
+                        "movement_steps": 4,
+                        "revisit_yaw_offset": 20,
                     }
                 )
             )
@@ -264,7 +315,12 @@ def main() -> None:
         raise ValueError("--output-dir must be inside the VMem repository")
     specs = build_specs(list(args.groups), list(args.scenes), list(args.seeds))
     print(f"[matrix] planned runs={len(specs)} output={output_dir}", flush=True)
-    records = []
+    aggregate_path = output_dir / "matrix_summary.json"
+    if aggregate_path.exists() and not args.force:
+        existing_records = json.loads(aggregate_path.read_text(encoding="utf-8"))
+    else:
+        existing_records = []
+    records_by_id = {record["run_id"]: record for record in existing_records}
     failures = 0
 
     for index, spec in enumerate(specs, start=1):
@@ -276,7 +332,9 @@ def main() -> None:
             continue
         if summary_path.exists() and not args.force:
             print(f"[{index}/{len(specs)}] skip completed {spec['run_id']}", flush=True)
-            records.append(aggregate_record(spec, run_dir, "existing", 0.0))
+            records_by_id[spec["run_id"]] = aggregate_record(
+                spec, run_dir, "existing", 0.0
+            )
             continue
 
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -294,15 +352,17 @@ def main() -> None:
         status = "complete" if result.returncode == 0 and summary_path.exists() else "failed"
         if status == "failed":
             failures += 1
-        records.append(aggregate_record(spec, run_dir, status, seconds))
-        save_aggregate(output_dir, records)
+        records_by_id[spec["run_id"]] = aggregate_record(
+            spec, run_dir, status, seconds
+        )
+        save_aggregate(output_dir, list(records_by_id.values()))
         print(
             f"[{index}/{len(specs)}] {status} {spec['run_id']} seconds={seconds:.1f}",
             flush=True,
         )
 
     if not args.dry_run:
-        save_aggregate(output_dir, records)
+        save_aggregate(output_dir, list(records_by_id.values()))
     if failures:
         raise SystemExit(f"{failures} matrix run(s) failed")
 
