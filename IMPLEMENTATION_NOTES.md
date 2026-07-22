@@ -1,6 +1,6 @@
 # VMem 구현 메모: 논문 기준과 현재 작업 트리의 차이
 
-마지막 확인: 2026-07-22
+마지막 확인: 2026-07-23
 
 ## 이 문서의 목적
 
@@ -72,6 +72,18 @@
 - 생성 frame, 영상, camera pose, memory trace, JSON report
 
 관련 suite script는 원래 UI 버튼과 비슷한 이동, 넓은 회전, 반복 재방문과 360도 회전을 재현하기 위해 추가됐다. 이 테스트는 논문 공식 evaluation을 그대로 복제한 것이 아니라 현재 구현의 장기 일관성 실패를 빠르게 찾기 위한 regression 도구다.
+
+새 `scripts/run_revisit_experiment.py`는 위 regression 도구와 별도로 다음 실험 계측을 추가한다.
+
+- `surfel`, `recent`, `initial_only` context baseline
+- exact/novel-angle/partial-overlap revisit, rotation accumulation, revisit gap
+- `correct`, `none`, `wrong`, `correct_plus_wrong` memory intervention
+- surfel 후보 relevance와 pose distance, routing index와 실제 content source index 분리 기록
+- frame/context contact sheet, JSON/JSONL, CSV, manual-label manifest 저장
+
+이 기능은 논문의 새로운 memory architecture가 아니다. `wrong` 계열 intervention은 surfel이나 checkpoint를 손상시키지 않고 선택된 route pose/K는 유지한 채 latent와 CLIP embedding의 source만 다른 저장 frame으로 교체한다. 따라서 routing과 generation integration의 민감도를 분리하기 위한 실험 장치로만 해석해야 한다. 기본 앱 경로에서는 실험 모드가 비활성이고 기존 `surfel`/`correct` 동작을 유지한다.
+
+2026-07-23 최소 `living_room`, seed 42, forward 1회/return 1회 dry run에서는 correct memory가 30.44 dB였지만 strict wrong과 correct+wrong이 각각 22.20 dB, 22.13 dB였다. `recent`는 이 짧은 run에서 surfel과 같은 context를 골라 30.44 dB였고 `initial_only`는 30.54 dB였다. 모든 조건은 exact pose 복귀와 자동 rollout validity flag 0개를 기록했다. 이 결과는 한 장면·한 seed의 instrumentation 검증이며 일반화된 논문 성능 결론이 아니다. 상세 수치는 `failure_analysis.md`에만 기록한다.
 
 ### 5. 배포 및 의존성 변경
 
