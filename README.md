@@ -82,6 +82,33 @@ accumulation, and revisit-gap trajectories; and `correct`, `none`, `wrong`, or
 python scripts/run_revisit_experiment.py --help
 ```
 
+Controlled follow-up ablations can limit corruption to a number or explicit
+set of context slots and can independently replace latent, CLIP, or
+pose/intrinsics conditioning:
+
+```bash
+python scripts/run_revisit_experiment.py \
+  --scene test_samples/living_room.jpg \
+  --context-mode surfel \
+  --trajectory exact_revisit \
+  --memory-intervention correct_plus_wrong \
+  --intervention-components latent \
+  --wrong-slot-count 1 \
+  --output-dir experiments/results/latent_slot1
+```
+
+The bounded follow-up matrix is resumable and runs sequentially so it does not
+compete with itself for GPU memory:
+
+```bash
+python scripts/run_revisit_matrix.py \
+  --groups dose components novel context rotation gap contamination repro \
+  --output-dir experiments/results/overnight
+```
+
+It writes `matrix_summary.json` and `matrix_summary.csv` after every run and
+skips directories that already contain a completed `summary.json`.
+
 Each run writes frames, an MP4, actual camera poses, strict JSON/JSONL memory
 traces, a summary CSV, context images, contact sheets, and a manual-label
 manifest below its `--output-dir`. Large outputs under `experiments/results/`

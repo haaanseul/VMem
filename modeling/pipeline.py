@@ -136,6 +136,9 @@ class VMemPipeline:
         self.experiment_context_mode = "surfel"
         self.experiment_memory_intervention = "correct"
         self.experiment_intervention_active = False
+        self.experiment_intervention_components = "latent_clip"
+        self.experiment_wrong_slot_count = None
+        self.experiment_wrong_slot_indices = None
        
 
     def reset(self):
@@ -166,9 +169,13 @@ class VMemPipeline:
         context_mode="surfel",
         memory_intervention="correct",
         intervention_active=False,
+        intervention_components="latent_clip",
+        wrong_slot_count=None,
+        wrong_slot_indices=None,
     ):
         valid_context_modes = {"surfel", "recent", "initial_only"}
         valid_interventions = {"correct", "none", "wrong", "correct_plus_wrong"}
+        valid_components = {"latent", "clip", "latent_clip", "pose_intrinsics"}
         if context_mode not in valid_context_modes:
             raise ValueError(
                 f"Unknown context mode {context_mode!r}; expected one of {sorted(valid_context_modes)}"
@@ -178,10 +185,26 @@ class VMemPipeline:
                 "Unknown memory intervention "
                 f"{memory_intervention!r}; expected one of {sorted(valid_interventions)}"
             )
+        if intervention_components not in valid_components:
+            raise ValueError(
+                f"Unknown intervention components {intervention_components!r}; "
+                f"expected one of {sorted(valid_components)}"
+            )
+        if wrong_slot_count is not None and int(wrong_slot_count) < 0:
+            raise ValueError("wrong_slot_count must be non-negative")
         self.experiment_enabled = True
         self.experiment_context_mode = context_mode
         self.experiment_memory_intervention = memory_intervention
         self.experiment_intervention_active = bool(intervention_active)
+        self.experiment_intervention_components = intervention_components
+        self.experiment_wrong_slot_count = (
+            None if wrong_slot_count is None else int(wrong_slot_count)
+        )
+        self.experiment_wrong_slot_indices = (
+            None
+            if wrong_slot_indices is None
+            else [int(index) for index in wrong_slot_indices]
+        )
 
     def set_revisit_intervention_active(self, active):
         self.experiment_intervention_active = bool(active)
@@ -636,15 +659,17 @@ class VMemPipeline:
                 result.append(result[-1])
             return result[:count]
 
-        def prepare_context_data(route_indices, content_source_indices):
+        def prepare_context_data(
+            route_indices, latent_source_indices, embedding_source_indices
+        ):
             c2ws = [self.c2ws[i] for i in route_indices]
             latents = [
                 torch.from_numpy(self.latents[i]).to(self.device, self.dtype)
-                for i in content_source_indices
+                for i in latent_source_indices
             ]
             embeddings = [
                 torch.from_numpy(self.encoder_embeddings[i]).to(self.device, self.dtype)
-                for i in content_source_indices
+                for i in embedding_source_indices
             ]
             intrinsics = [self.Ks[i] for i in route_indices]
             return c2ws, latents, embeddings, intrinsics
@@ -816,7 +841,9 @@ class VMemPipeline:
 
         pre_intervention_indices = list(selected_indices)
         route_indices = list(selected_indices)
-        content_source_indices = list(selected_indices)
+        latent_source_indices = list(selected_indices)
+        embedding_source_indices = list(selected_indices)
+        corrupted_slots = []
         active_intervention = (
             self.experiment_memory_intervention
             if self.experiment_enabled and self.experiment_intervention_active
@@ -828,7 +855,8 @@ class VMemPipeline:
             route_indices = fill_context_slots(
                 list(range(start, len(self.latents))), desired_context_count
             )
-            content_source_indices = list(route_indices)
+            latent_source_indices = list(route_indices)
+            embedding_source_indices = list(route_indices)
             context_reason = "intervention_none_recent"
         elif active_intervention in {"wrong", "correct_plus_wrong"}:
             route_set = set(route_indices)
@@ -861,15 +889,50 @@ class VMemPipeline:
                 wrong_sources.append(
                     alternatives[position % len(alternatives)]
                 )
-            if active_intervention == "wrong":
-                content_source_indices = wrong_sources
+            if self.experiment_wrong_slot_indices is not None:
+                corrupted_slots = sorted(
+                    {
+                        position
+                        for position in self.experiment_wrong_slot_indices
+                        if 0 <= position < len(route_indices)
+                    }
+                )
+            elif self.experiment_wrong_slot_count is not None:
+                corrupted_slots = list(
+                    range(
+                        min(
+                            self.experiment_wrong_slot_count,
+                            len(route_indices),
+                        )
+                    )
+                )
+            elif active_intervention == "wrong":
+                corrupted_slots = list(range(len(route_indices)))
             else:
-                content_source_indices = list(route_indices)
-                replace_positions = list(range(0, len(route_indices), 2))
-                if not replace_positions and route_indices:
-                    replace_positions = [len(route_indices) - 1]
-                for position in replace_positions:
-                    content_source_indices[position] = wrong_sources[position]
+                corrupted_slots = list(range(0, len(route_indices), 2))
+
+            for position in corrupted_slots:
+                wrong_source = wrong_sources[position]
+                if self.experiment_intervention_components == "latent":
+                    latent_source_indices[position] = wrong_source
+                elif self.experiment_intervention_components == "clip":
+                    embedding_source_indices[position] = wrong_source
+                elif self.experiment_intervention_components == "latent_clip":
+                    latent_source_indices[position] = wrong_source
+                    embedding_source_indices[position] = wrong_source
+                elif self.experiment_intervention_components == "pose_intrinsics":
+                    route_indices[position] = wrong_source
+
+        if latent_source_indices == embedding_source_indices:
+            content_source_indices = list(latent_source_indices)
+        else:
+            content_source_indices = None
+        if latent_source_indices != pre_intervention_indices:
+            context_image_source_indices = list(latent_source_indices)
+        elif embedding_source_indices != pre_intervention_indices:
+            context_image_source_indices = list(embedding_source_indices)
+        else:
+            context_image_source_indices = list(pre_intervention_indices)
 
         candidate_records = [
             {
@@ -887,19 +950,30 @@ class VMemPipeline:
         details = {
             "context_mode": context_mode,
             "configured_memory_intervention": self.experiment_memory_intervention,
+            "intervention_components": self.experiment_intervention_components,
             "active_memory_intervention": active_intervention,
             "intervention_active": bool(self.experiment_intervention_active),
+            "configured_wrong_slot_count": self.experiment_wrong_slot_count,
+            "configured_wrong_slot_indices": self.experiment_wrong_slot_indices,
+            "corrupted_slots": corrupted_slots,
             "fallback_used": bool(fallback_used),
             "candidate_frames": candidate_records,
             "pre_intervention_indices": pre_intervention_indices,
             "route_indices": route_indices,
             "content_source_indices": content_source_indices,
+            "latent_source_indices": latent_source_indices,
+            "embedding_source_indices": embedding_source_indices,
+            "context_image_source_indices": context_image_source_indices,
             "target_average_pose": average_c2w.tolist(),
         }
         self._record_context_debug(route_indices, context_reason, target_c2ws, details)
 
         context_c2ws, context_latents, context_encoder_embeddings, context_Ks = (
-            prepare_context_data(route_indices, content_source_indices)
+            prepare_context_data(
+                route_indices,
+                latent_source_indices,
+                embedding_source_indices,
+            )
         )
         return {
             "context_c2ws": torch.from_numpy(np.asarray(context_c2ws)).to(
@@ -914,6 +988,8 @@ class VMemPipeline:
             ),
             "context_time_indices": route_indices,
             "content_source_indices": content_source_indices,
+            "latent_source_indices": latent_source_indices,
+            "embedding_source_indices": embedding_source_indices,
         }
 
 

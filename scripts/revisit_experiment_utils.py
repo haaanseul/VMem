@@ -17,6 +17,7 @@ TRAJECTORIES = (
     "partial_overlap",
     "rotation_accumulation",
     "revisit_gap",
+    "contamination_followup",
 )
 ROTATION_SCHEDULES = {
     "90x1": (90.0, 1),
@@ -77,7 +78,13 @@ def build_trajectory(
             }
         )
 
-    if name in {"exact_revisit", "novel_angle_revisit", "partial_overlap", "revisit_gap"}:
+    if name in {
+        "exact_revisit",
+        "novel_angle_revisit",
+        "partial_overlap",
+        "revisit_gap",
+        "contamination_followup",
+    }:
         for _ in range(movement_steps):
             add("forward:1", "outbound", "move away from initial pose")
 
@@ -98,6 +105,9 @@ def build_trajectory(
         elif name == "partial_overlap":
             offset = max(abs(revisit_yaw_offset), 45.0)
             add(f"yaw:{offset:g}", "revisit_offset", "partial-overlap yaw")
+        elif name == "contamination_followup":
+            add(f"yaw:{yaw_step:g}", "followup", "post-intervention yaw")
+            add(f"yaw:{-yaw_step:g}", "followup", "post-intervention return")
     else:
         degrees, count = ROTATION_SCHEDULES[rotation_schedule]
         for step in range(count):
@@ -202,6 +212,8 @@ def save_summary_csv(path: Path, summary: dict) -> None:
         "context_mode": summary.get("context_mode"),
         "trajectory": summary.get("trajectory"),
         "memory_intervention": summary.get("memory_intervention"),
+        "intervention_components": summary.get("intervention_components"),
+        "wrong_slot_count": summary.get("wrong_slot_count"),
         "num_commands": summary.get("num_commands"),
         "generation_calls": summary.get("generation_calls"),
         "num_frames": summary.get("num_frames"),

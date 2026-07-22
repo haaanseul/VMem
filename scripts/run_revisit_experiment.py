@@ -63,6 +63,23 @@ def build_parser() -> argparse.ArgumentParser:
         default="revisit",
         help="Apply memory intervention only on revisit commands, on all commands, or never.",
     )
+    parser.add_argument(
+        "--intervention-components",
+        choices=("latent", "clip", "latent_clip", "pose_intrinsics"),
+        default="latent_clip",
+        help="Which conditioning component receives the selected wrong source.",
+    )
+    parser.add_argument(
+        "--wrong-slot-count",
+        type=int,
+        default=None,
+        help="Corrupt the first N context slots; overrides the intervention default.",
+    )
+    parser.add_argument(
+        "--wrong-slot-indices",
+        default=None,
+        help="Comma-separated zero-based context slots; mutually exclusive with --wrong-slot-count.",
+    )
     parser.add_argument("--output-dir", default="experiments/results/dry_run")
     parser.add_argument("--fps", type=int, default=12)
     parser.add_argument(
@@ -94,6 +111,14 @@ def should_activate_intervention(phase: str, setting: str) -> bool:
     return phase in {"revisit", "revisit_offset"}
 
 
+def parse_slot_indices(raw_value: str | None) -> list[int] | None:
+    if raw_value is None:
+        return None
+    if not raw_value.strip():
+        return []
+    return [int(value.strip()) for value in raw_value.split(",")]
+
+
 def run_navigation_command(navigator, command: str):
     name, amount = parse_command(command)
     if name == "yaw":
@@ -120,6 +145,13 @@ def main() -> None:
         return
     if args.interp_frames < 1:
         raise ValueError("--interp-frames must be at least 1")
+    if args.wrong_slot_count is not None and args.wrong_slot_count < 0:
+        raise ValueError("--wrong-slot-count must be non-negative")
+    if args.wrong_slot_count is not None and args.wrong_slot_indices is not None:
+        raise ValueError(
+            "--wrong-slot-count and --wrong-slot-indices are mutually exclusive"
+        )
+    wrong_slot_indices = parse_slot_indices(args.wrong_slot_indices)
 
     scene_path = resolve_repo_path(args.scene, must_exist=True)
     config_path = resolve_repo_path(args.config, must_exist=True)
@@ -147,6 +179,9 @@ def main() -> None:
         "rotation_schedule": args.rotation_schedule,
         "memory_intervention": args.memory_intervention,
         "intervention_phase": args.intervention_phase,
+        "intervention_components": args.intervention_components,
+        "wrong_slot_count": args.wrong_slot_count,
+        "wrong_slot_indices": wrong_slot_indices,
         "fps": args.fps,
         "inference_steps_override": args.inference_steps,
         "commands": commands,
@@ -192,6 +227,9 @@ def main() -> None:
             context_mode=args.context_mode,
             memory_intervention=args.memory_intervention,
             intervention_active=args.intervention_phase == "all",
+            intervention_components=args.intervention_components,
+            wrong_slot_count=args.wrong_slot_count,
+            wrong_slot_indices=wrong_slot_indices,
         )
         navigator = Navigator(
             model,
@@ -243,8 +281,13 @@ def main() -> None:
                     }
                 )
                 saved_context_paths = []
+                image_sources = entry.get("context_image_source_indices") or entry.get(
+                    "content_source_indices"
+                ) or entry.get("route_indices", [])
+                latent_sources = entry.get("latent_source_indices", image_sources)
+                embedding_sources = entry.get("embedding_source_indices", image_sources)
                 for slot, (route_index, source_index) in enumerate(
-                    zip(entry.get("route_indices", []), entry.get("content_source_indices", []))
+                    zip(entry.get("route_indices", []), image_sources)
                 ):
                     context_image = model.pil_frames[int(source_index)]
                     relative_path = Path("contexts") / (
@@ -257,21 +300,29 @@ def main() -> None:
                     saved_context_paths.append(str(relative_path))
                     context_images.append(context_image.copy())
                     context_labels.append(
-                        f"t{trace_index} s{slot} r{int(route_index)}→c{int(source_index)}"
+                        f"t{trace_index} s{slot} r{int(route_index)} "
+                        f"l{int(latent_sources[slot])} e{int(embedding_sources[slot])}"
                     )
                 entry["context_image_paths"] = saved_context_paths
 
-            command_records.append(
-                {
-                    **command_plan,
-                    "intervention_active": active,
-                    "generated_frames": len(new_frames),
-                    "generation_calls": len(new_entries),
-                    "runtime_seconds": command_seconds,
-                    "frame_start": before_frame_count,
-                    "frame_end": len(all_frames) - 1,
-                }
-            )
+            command_record = {
+                **command_plan,
+                "intervention_active": active,
+                "generated_frames": len(new_frames),
+                "generation_calls": len(new_entries),
+                "runtime_seconds": command_seconds,
+                "frame_start": before_frame_count,
+                "frame_end": len(all_frames) - 1,
+            }
+            if new_frames:
+                command_record["last_frame_initial_metrics"] = image_metrics(
+                    initial_frame, new_frames[-1]
+                )
+                if len(all_frames) >= 2:
+                    command_record["last_frame_previous_metrics"] = image_metrics(
+                        all_frames[-2], all_frames[-1]
+                    )
+            command_records.append(command_record)
             print(
                 "[experiment] "
                 f"command={command_plan['command']} phase={command_plan['phase']} "
@@ -336,6 +387,9 @@ def main() -> None:
             "trajectory": args.trajectory,
             "memory_intervention": args.memory_intervention,
             "intervention_phase": args.intervention_phase,
+            "intervention_components": args.intervention_components,
+            "wrong_slot_count": args.wrong_slot_count,
+            "wrong_slot_indices": wrong_slot_indices,
             "num_commands": len(commands),
             "generation_calls": len(model.debug_context_history),
             "num_frames": len(all_frames),
