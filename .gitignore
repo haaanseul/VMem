@@ -44,3 +44,8 @@ models/
 # OS files
 .DS_Store
 Thumbs.db
+
+*.pdf
+
+# Spatial-memory revisit experiments
+experiments/results/
