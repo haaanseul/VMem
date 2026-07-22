@@ -1,7 +1,10 @@
 from typing import List, Literal
 from pathlib import Path
 from functools import partial
-import spaces
+import faulthandler
+import sys
+import time
+import traceback
 import gradio as gr
 import numpy as np
 import torch
@@ -14,16 +17,48 @@ from navigation import Navigator
 from utils import tensor_to_pil, get_default_intrinsics, load_img_and_K, transform_img_and_K
 import os
 import shutil
+import threading
 
+
+CRASH_LOG_PATH = os.environ.get("VMEM_CRASH_LOG", "vmem_crash.log")
+RUNTIME_LOG_PATH = os.environ.get("VMEM_RUNTIME_LOG", "vmem_runtime.log")
+_CRASH_LOG_FILE = open(CRASH_LOG_PATH, "a", buffering=1)
+faulthandler.enable(_CRASH_LOG_FILE, all_threads=True)
+
+
+def log_event(message: str):
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    with open(RUNTIME_LOG_PATH, "a", buffering=1) as log_file:
+        log_file.write(f"[{timestamp}] {message}\n")
+
+
+def _log_unhandled_exception(exc_type, exc_value, exc_traceback):
+    log_event("UNHANDLED EXCEPTION")
+    with open(RUNTIME_LOG_PATH, "a", buffering=1) as log_file:
+        traceback.print_exception(exc_type, exc_value, exc_traceback, file=log_file)
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+
+sys.excepthook = _log_unhandled_exception
 
 CONFIG_PATH = "configs/inference/inference.yaml"
 CONFIG = OmegaConf.load(CONFIG_PATH)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(
+    f"[VMem] device={DEVICE}, visualize={CONFIG.inference.visualize}, "
+    f"crash_log={CRASH_LOG_PATH}, runtime_log={RUNTIME_LOG_PATH}"
+)
+log_event(
+    f"startup device={DEVICE} visualize={CONFIG.inference.visualize} pid={os.getpid()}"
+)
 MODEL = VMemPipeline(CONFIG, DEVICE)
 NAVIGATORS = []
+NAVIGATION_LOCK = threading.Lock()
 
 
-NAVIGATION_FPS = 13
+NAVIGATION_FPS = int(os.environ.get("VMEM_NAVIGATION_FPS", "13"))
+NAVIGATION_INTERPOLATION_FRAMES = int(os.environ.get("VMEM_NAVIGATION_INTERPOLATION_FRAMES", "4"))
+NAVIGATION_STEP_SIZE = float(os.environ.get("VMEM_NAVIGATION_STEP_SIZE", "0.1"))
 WIDTH = 576
 HEIGHT = 576
 
@@ -110,12 +145,12 @@ def load_image_for_navigation(image_path):
     config = OmegaConf.load(CONFIG_PATH)
     image, _ = transform_img_and_K(image, (config.model.height, config.model.width), mode="crop", K=None)
     
-    # Create initial video with single frame and pose
-    video = image
+    # Gradio state must not keep CUDA tensors; keep UI/session state on CPU.
+    video = image.detach().cpu()
     pose = torch.eye(4).unsqueeze(0)  # [1, 4, 4]
     
     return {
-        "image": tensor_to_pil(image),
+        "image": tensor_to_pil(video),
         "video": video,
         "pose": pose
     }
@@ -152,7 +187,6 @@ def get_duration_navigate_video(video: torch.Tensor,
     
     return base_duration
 
-@spaces.GPU(duration=get_duration_navigate_video)
 @torch.autocast("cuda")
 @torch.no_grad()
 def navigate_video(
@@ -171,6 +205,30 @@ def navigate_video(
     
     Each Navigator instance is stored based on the video session to maintain state.
     """
+    with NAVIGATION_LOCK:
+        succeeded = False
+        try:
+            result = _navigate_video_impl(video, poses, x_angle, y_angle, distance)
+            succeeded = True
+            return result
+        finally:
+            if succeeded and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+
+def _navigate_video_impl(
+    video: torch.Tensor,
+    poses: torch.Tensor,
+    x_angle: float,
+    y_angle: float,
+    distance: float,
+):
+    global NAVIGATORS
+    log_event(
+        f"navigate start video_len={len(video) if video is not None else None} "
+        f"poses_len={len(poses) if poses is not None else None} "
+        f"x={x_angle} y={y_angle} distance={distance}"
+    )
     try:
         # Convert first frame to PIL Image for navigator
         initial_frame = tensor_to_pil(video[0])
@@ -178,7 +236,13 @@ def navigate_video(
         # Initialize the navigator for this session if not already done
         if len(NAVIGATORS) == 0:
             # Create a new navigator instance
-            NAVIGATORS.append(Navigator(MODEL, step_size=0.1, num_interpolation_frames=4))
+            NAVIGATORS.append(
+                Navigator(
+                    MODEL,
+                    step_size=NAVIGATION_STEP_SIZE,
+                    num_interpolation_frames=NAVIGATION_INTERPOLATION_FRAMES,
+                )
+            )
             
             # Get the initial pose and convert to numpy
             initial_pose = poses[0].cpu().numpy().reshape(4, 4)
@@ -233,9 +297,10 @@ def navigate_video(
         
         new_frames_tensor = torch.stack(new_frame_tensors)
         
-        # Get the updated camera poses from the navigator
-        current_pose = navigator.current_pose
-        new_poses = torch.from_numpy(current_pose).float().unsqueeze(0).repeat(len(new_frames), 1, 1)
+        generated_poses = getattr(navigator, "last_generated_poses", None) or []
+        if len(generated_poses) != len(new_frames):
+            generated_poses = [navigator.current_pose] * len(new_frames)
+        new_poses = torch.from_numpy(np.array(generated_poses)).float()
         
         # Reshape the poses to match the expected format
         new_poses = new_poses.view(len(new_frames), 4, 4)
@@ -255,7 +320,21 @@ def navigate_video(
             export_to_video(updated_video_pil, fps=NAVIGATION_FPS),  # Video
             all_images,  # Gallery
         )
+    except RuntimeError as e:
+        log_event(f"navigate RuntimeError: {repr(e)}")
+        print(f"Error in navigate_video: {e}")
+        gr.Warning(f"Navigation error: {e}")
+        if "CUDA error" in str(e):
+            NAVIGATORS = []
+            return video, poses, None, None, []
+        # Return the original inputs to avoid crashes
+        current_frame = tensor_to_pil(video[-1]) if len(video) > 0 else None
+        all_frames = [(tensor_to_pil(video[i]), f"t={i}") for i in range(len(video))]
+        video_frames = [tensor_to_pil(video[i]) for i in range(len(video))]
+        video_output = export_to_video(video_frames, fps=NAVIGATION_FPS) if video_frames else None
+        return video, poses, current_frame, video_output, all_frames
     except Exception as e:
+        log_event(f"navigate Exception: {repr(e)}")
         print(f"Error in navigate_video: {e}")
         gr.Warning(f"Navigation error: {e}")
         # Return the original inputs to avoid crashes
@@ -355,6 +434,7 @@ def render_demonstrate(
                             upload_btn = gr.Button("Start Navigation", variant="primary", size="lg")
                     
                     def process_uploaded_image(image_path):
+                        log_event(f"process_uploaded_image start image_path={image_path}")
                         if image_path is None:
                             gr.Warning("Please upload an image first")
                             return "Selection", None, None, None
@@ -376,6 +456,7 @@ def render_demonstrate(
                                 result["pose"],
                             )
                         except Exception as e:
+                            log_event(f"process_uploaded_image Exception: {repr(e)}")
                             print(f"Error in process_uploaded_image: {e}")
                             gr.Warning(f"Error processing uploaded image: {e}")
                             return "Selection", None, None, None
@@ -422,6 +503,7 @@ def render_demonstrate(
                 gr.Markdown("_Click on an image to begin navigation_")
                 
                 def start_navigation(evt: gr.SelectData):
+                    log_event(f"start_navigation start index={getattr(evt, 'index', None)}")
                     try:
                         # Clear visualization directory to prevent users from seeing each other's generated images
                         clear_visualization_directory()
@@ -443,6 +525,7 @@ def render_demonstrate(
                             result["pose"],
                         )
                     except Exception as e:
+                        log_event(f"start_navigation Exception: {repr(e)}")
                         print(f"Error in start_navigation: {e}")
                         gr.Warning(f"Error starting navigation: {e}")
                         return "Selection", None, None, None
@@ -468,8 +551,8 @@ def render_demonstrate(
                             height=256,
                             autoplay=True,
                             loop=True,
-                            show_share_button=True,
-                            show_download_button=True,
+                            #show_share_button=True,
+                            #show_download_button=True,
                         )
 
                     demonstrate_generated_gallery = gr.Gallery(
@@ -815,7 +898,11 @@ with gr.Blocks(theme=gr.themes.Base(primary_hue="blue")) as demo:
     demo_idx = gr.State(value=3)
 
     with gr.Sidebar():
-        gr.Image("assets/title_logo.png", width=60, height=60, show_label=False, show_download_button=False, container=False, interactive=False, show_fullscreen_button=False)
+        gr.Image("assets/title_logo.png", width=60, height=60, show_label=False,
+                 #show_download_button=False,
+                 container=False, interactive=False,
+                 #show_fullscreen_button=False
+                 )
         gr.Markdown("# Consistent Interactive Video Scene Generation with Surfel-Indexed View Memory", elem_id="page-title")
         gr.Markdown(
             "### Interactive Demo for [_VMem_](http://arxiv.org/abs/2506.18903) that enables interactive consistent video scene generation."
@@ -877,8 +964,14 @@ with gr.Blocks(theme=gr.themes.Base(primary_hue="blue")) as demo:
                 
 
 if __name__ == "__main__":
+    server_name = os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0")
+    server_port = int(os.environ.get("GRADIO_SERVER_PORT", "7860"))
+    share = os.environ.get("GRADIO_SHARE", "0") == "1"
+    log_event(f"launch server_name={server_name} server_port={server_port} share={share}")
     demo.launch(debug=False,
-                share=True,
+                share=share,
                 max_threads=1,
-                show_error=False,
+                show_error=True,
+                server_name=server_name,
+                server_port=server_port,
                 )

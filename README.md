@@ -56,6 +56,8 @@ We provide a demo for you to interact with `VMem`. Simply run
 python app.py
 ```
 
+For moving this working tree to another server through GitHub, see [DEPLOYMENT.md](DEPLOYMENT.md).
+
 
 ## :heart: Acknowledgement
 This work is built on top of [CUT3R](https://github.com/CUT3R/CUT3R), [DUSt3R](https://github.com/naver/dust3r) and [Stable Virtual Camera](https://github.com/stability-ai/stable-virtual-camera). We thank them for their great works.

@@ -1,5 +1,46 @@
-*pyc
-*pth
-.vscode
-.gradio
-visualization
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# IDE / app state
+.vscode/
+.idea/
+.gradio/
+
+# Runtime outputs
+logs/
+*.log
+revisit_outputs/
+outputs/
+output/
+tmp/
+temp/
+visualization/
+
+# Model checkpoints and large local artifacts
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
+checkpoints/
+weights/
+models/
+
+# OS files
+.DS_Store
+Thumbs.db

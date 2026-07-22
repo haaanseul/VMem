@@ -39,7 +39,7 @@ surfel:
     height: 288
 
 inference:
-    visualize: true
+    visualize: false
     visualize_pointcloud: false
     visualize_surfel: false
 

@@ -1,0 +1,37 @@
+pydantic
+gradio
+matplotlib
+tqdm
+opencv-python
+scipy
+einops
+trimesh
+tensorboard
+transformers
+pyglet<2
+huggingface-hub[torch]
+pillow-heif
+pyrender
+kapture
+kapture-localization
+numpy==1.24.4
+numpy-quaternion
+pycolmap  # for pnp
+poselib  # for pnp
+viser
+tyro
+ninja
+colorama
+pytorch-lightning
+splines
+diffusers
+kornia
+open-clip-torch
+accelerate
+imageio[ffmpeg]
+roma
+spaces
+omegaconf
+wandb
+evo
+open3d

@@ -1255,18 +1255,34 @@ def visualize_depth(depth_image,
             The visualization image.
         """
         # Normalize the depth values for visualization
-        depth_min = depth_image.min()
-        depth_max = depth_image.max()
+        depth_image = np.asarray(depth_image, dtype=np.float32)
+        finite_mask = np.isfinite(depth_image)
+        if not finite_mask.any():
+            depth_vis = np.zeros_like(depth_image, dtype=np.uint8)
+            depth_vis_img = Image.fromarray(depth_vis, mode='L')
+            depth_vis_img = depth_vis_img.resize(size, Image.NEAREST)
+            os.makedirs(visualization_dir, exist_ok=True)
+            depth_vis_img.save(os.path.join(visualization_dir, file_name))
+            return depth_vis_img
+
+        finite_depth = depth_image[finite_mask]
+        depth_min = finite_depth.min()
+        depth_max = finite_depth.max()
         print(f"Depth min: {depth_min}, max: {depth_max}")
-        depth_image  = np.clip(depth_image, 0, depth_max)
-        depth_vis = (depth_image - depth_min) / (depth_max - depth_min)
-        depth_vis = (depth_vis * 255).astype(np.uint8)
+        if depth_max <= depth_min:
+            depth_vis = np.zeros_like(depth_image, dtype=np.uint8)
+        else:
+            depth_image = np.where(finite_mask, depth_image, depth_min)
+            depth_image = np.clip(depth_image, depth_min, depth_max)
+            depth_vis = (depth_image - depth_min) / (depth_max - depth_min)
+            depth_vis = (depth_vis * 255).astype(np.uint8)
 
         # Convert the depth image to a PIL image
         depth_vis_img = Image.fromarray(depth_vis, mode='L')
 
         depth_vis_img = depth_vis_img.resize(size, Image.NEAREST)
         # Save the visualization image
+        os.makedirs(visualization_dir, exist_ok=True)
         depth_vis_img.save(os.path.join(visualization_dir, file_name))
 
         return depth_vis_img

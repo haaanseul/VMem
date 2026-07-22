@@ -38,6 +38,8 @@ class Navigator:
         self.frames = []
         self.num_interpolation_frames = num_interpolation_frames
         self.pose_history = []  # Store history of camera poses
+        self.last_generated_poses = []
+        self._move_frame_counts = []
         
     def initialize(self, image, initial_pose, initial_K):
         """
@@ -58,6 +60,8 @@ class Navigator:
         # Use the pipeline's initialize method
         initial_frame = self.pipeline.initialize(image, initial_pose, initial_K)
         self.frames = [initial_frame]
+        self.last_generated_poses = []
+        self._move_frame_counts = []
         
         # Save the initial pose
         self.pose_history.append({
@@ -185,10 +189,12 @@ class Navigator:
         new_frames = self.pipeline.generate_trajectory_frames(interpolated_poses, 
                                                               interpolated_Ks,
                                                               use_non_maximum_suppression=False)
+        self.last_generated_poses = interpolated_poses[-len(new_frames):] if new_frames else []
         
         # Update the current pose to the final pose
         self.current_pose = interpolated_poses[-1]
         self.frames.extend(new_frames)
+        self._move_frame_counts.append(len(new_frames))
         
         # Save the final pose
         self.pose_history.append({
@@ -234,10 +240,12 @@ class Navigator:
         new_frames = self.pipeline.generate_trajectory_frames(interpolated_poses, 
                                                               interpolated_Ks,
                                                               use_non_maximum_suppression=False)
+        self.last_generated_poses = interpolated_poses[-len(new_frames):] if new_frames else []
         
         # Update the current pose to the final pose
         self.current_pose = interpolated_poses[-1]
         self.frames.extend(new_frames)
+        self._move_frame_counts.append(len(new_frames))
         
         # Save the final pose
         self.pose_history.append({
@@ -319,10 +327,12 @@ class Navigator:
         
         # Generate frames for interpolated poses
         new_frames = self.pipeline.generate_trajectory_frames(interpolated_poses, interpolated_Ks)
+        self.last_generated_poses = interpolated_poses[-len(new_frames):] if new_frames else []
         
         # Update the current pose to the final pose
         self.current_pose = interpolated_poses[-1]
         self.frames.extend(new_frames)
+        self._move_frame_counts.append(len(new_frames))
         
         # Save the final pose
         self.pose_history.append({
@@ -388,18 +398,21 @@ class Navigator:
             return False
             
         # Use pipeline's undo function to remove the last batch of frames
-        success = self.pipeline.undo_latest_move()
+        frames_to_remove = self._move_frame_counts[-1] if self._move_frame_counts else self.pipeline.config.model.target_num_frames
+        success = self.pipeline.undo_latest_move(frames_to_remove)
         
         if success:
             # Remove the last pose from history
             self.pose_history.pop()
+            if self._move_frame_counts:
+                self._move_frame_counts.pop()
             
             # Set current pose to the previous pose
             prev_pose_data = self.pose_history[-1]
             self.current_pose = np.array(prev_pose_data["transform_matrix"])
             
             # Remove frames from the frames list
-            frames_to_remove = min(self.pipeline.config.model.target_num_frames, len(self.frames) - 1)
+            frames_to_remove = min(frames_to_remove, len(self.frames) - 1)
             for _ in range(frames_to_remove):
                 if len(self.frames) > 1:  # Keep at least the initial frame
                     self.frames.pop()
@@ -432,4 +445,3 @@ class Navigator:
         print(f"Camera poses saved to {output_path}")
     
    
-

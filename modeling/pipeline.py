@@ -130,20 +130,58 @@ class VMemPipeline:
             os.makedirs(self.visualize_dir)
         
         self.global_step = 0
+        self.debug_context_history = []
+        self.initial_threshold = 1.0
        
 
     def reset(self):
-        self.rgb_vae_latents = []
-        self.rgb_encoder_embeddings = []
+        self.latents = []
+        self.encoder_embeddings = []
         self.poses = []
+        self.c2ws = []
         self.focal_lengths = []
         self.surfels = []
         self.surfel_Ks = []
         self.surfel_depths = []
         self.Ks = []
         self.surfel_to_timestep = {}
-        self.all_pil_frames = []
+        self.pil_frames = []
         self.global_step = 0
+        self.debug_context_history = []
+        self.initial_threshold = 1.0
+
+    def _normalize_indices_for_debug(self, indices):
+        if isinstance(indices, torch.Tensor):
+            return [int(i) for i in indices.detach().cpu().tolist()]
+        if isinstance(indices, np.ndarray):
+            return [int(i) for i in indices.tolist()]
+        return [int(i) for i in indices]
+
+    def _record_context_debug(self, indices, reason, target_c2ws=None):
+        target_count = int(len(target_c2ws)) if target_c2ws is not None else None
+        target_start = len(self.pil_frames)
+        entry = {
+            "generation_step": int(self.global_step),
+            "reason": reason,
+            "context_time_indices": self._normalize_indices_for_debug(indices),
+            "num_existing_frames": int(len(self.pil_frames)),
+            "num_latents": int(len(self.latents)),
+            "num_surfels": int(len(self.surfels)),
+            "target_count": target_count,
+            "target_time_indices": (
+                list(range(target_start, target_start + target_count))
+                if target_count is not None else None
+            ),
+        }
+        self.debug_context_history.append(entry)
+        print(
+            "[context] "
+            f"step={entry['generation_step']} reason={reason} "
+            f"context={entry['context_time_indices']} "
+            f"targets={entry['target_time_indices']} "
+            f"existing={entry['num_existing_frames']} surfels={entry['num_surfels']}",
+            flush=True,
+        )
 
     
     def initialize(self, image, c2w, K):
@@ -268,7 +306,14 @@ class VMemPipeline:
         surfel_index_map = np.full((image_height, image_width), -1, dtype=np.int32)
         z_buffer = np.full((image_height, image_width), np.inf, dtype=np.float32)
         cos_buffer = np.zeros((image_height, image_width), dtype=np.float32)
-
+        if surfels is None or len(surfels) == 0:
+            print("[render_surfels_to_image] empty surfels")
+            depth = np.zeros((image_height, image_width), dtype=np.float32)
+            return {
+                "depth": depth,
+                "surfel_index_map": surfel_index_map,
+                "cos_value_map": cos_buffer,
+            }
         # Unpack camera parameters
         fx, fy, cx, cy = focal_lengths[0], focal_lengths[1], principal_points[0], principal_points[1]
         R = poses[0:3, 0:3]
@@ -280,9 +325,23 @@ class VMemPipeline:
         far_z = 1000.0  # Far plane distance
         
         # Convert all surfel positions to camera space at once for efficient culling
-        positions = np.array([s.position for s in surfels])
-        positions_h = np.concatenate([positions, np.ones((len(positions), 1))], axis=1)
-        
+        # positions = np.array([s.position for s in surfels])
+        # positions_h = np.concatenate([positions, np.ones((len(positions), 1))], axis=1)
+        positions = np.asarray([s.position for s in surfels], dtype=np.float32)
+
+        if positions.ndim != 2 or positions.shape[1] != 3 or positions.shape[0] == 0:
+            print("[render_surfels_to_image] invalid positions shape:", positions.shape)
+            depth = np.zeros((image_height, image_width), dtype=np.float32)
+            return {
+                "depth": depth,
+                "surfel_index_map": surfel_index_map,
+                "cos_value_map": cos_buffer,
+            }
+
+        positions_h = np.concatenate(
+            [positions, np.ones((positions.shape[0], 1), dtype=np.float32)],
+            axis=1
+        )
         # Compute camera matrix
         extrinsics = np.zeros((4, 4))
         extrinsics[0:3, 0:3] = np.linalg.inv(R)
@@ -473,21 +532,38 @@ class VMemPipeline:
         for j in range(len(filtered_surfel_index)):
             cos_value = filtered_cos_value[j]
             depth_value = filtered_depth[j]
-            if cos_value < 0:
+            if cos_value < 0 or not np.isfinite(cos_value) or not np.isfinite(depth_value):
                 continue
-            surfel_index = filtered_surfel_index[j]
-            timesteps = self.surfel_to_timestep[surfel_index]
+            surfel_index = int(filtered_surfel_index[j])
+            timesteps = self.surfel_to_timestep.get(surfel_index)
+            if not timesteps:
+                continue
    
             for timestep in timesteps:
-                
+                weight = cos_value / (1 + depth_value)
+                if not np.isfinite(weight):
+                    continue
                 if timestep not in timestep_count:
-                    timestep_count[timestep] = cos_value/(1+depth_value)
-                timestep_count[timestep] += cos_value/(1+depth_value)
+                    timestep_count[timestep] = 0
+                timestep_count[timestep] += weight
             
 
 
-        timestep_count_values = np.array(list(timestep_count.values()))
-        timestep_count_ratios = timestep_count_values / np.sum(timestep_count_values)
+        # timestep_count_values = np.array(list(timestep_count.values()))
+        # timestep_count_ratios = timestep_count_values / np.sum(timestep_count_values)
+        
+        if len(timestep_count) == 0:
+            print("[process_retrieved_spatial_information] no visible surfels")
+            return [], []
+        
+        timestep_count_values = np.array(list(timestep_count.values()), dtype=np.float32)
+        total = np.sum(timestep_count_values)
+
+        if not np.isfinite(total) or total <= 0:
+            print("[process_retrieved_spatial_information] invalid timestep weights")
+            return [], []
+        
+        timestep_count_ratios = timestep_count_values / total
         timestep_weights = {k: timestep_count_ratios[i] for i, k in enumerate(timestep_count)}
         num_retrieved_frames = min(self.config.model.context_num_frames+10, len(timestep_weights))
         frame_count = self.get_frame_distribution(num_retrieved_frames, list(timestep_weights.values())) # hard code
@@ -630,6 +706,7 @@ class VMemPipeline:
         # else:
         if len(self.pil_frames) == 1:
             context_time_indices = [0]
+            context_reason = "initial_frame"
         else:
             # get the average camera pose
             average_c2w = average_camera_pose(target_c2ws[-self.config.model.context_num_frames//4:])
@@ -645,6 +722,23 @@ class VMemPipeline:
                 image_height=int(self.config.surfel.height)
             )
             _, frame_count = self.process_retrieved_spatial_information(retrieved_info)
+            
+            if len(frame_count) == 0:
+                print("[get_context_info] surfel retrieval failed, falling back to recent frames")
+                max_frames = min(self.config.model.context_num_frames, len(self.latents))
+                context_time_indices = list(range(max(0, len(self.latents) - max_frames), len(self.latents)))
+                self._record_context_debug(context_time_indices, "fallback_recent_frames", target_c2ws)
+                context_data = prepare_context_data(context_time_indices)
+
+                (context_c2ws, context_latents, context_encoder_embeddings, context_Ks, context_time_indices) = context_data
+
+                return {
+                    "context_c2ws": torch.from_numpy(np.array(context_c2ws)).to(self.device, self.dtype),
+                    "context_latents": torch.stack(context_latents).to(self.device, self.dtype),
+                    "context_encoder_embeddings": torch.stack(context_encoder_embeddings).to(self.device, self.dtype),
+                    "context_Ks": torch.from_numpy(np.array(context_Ks)).to(self.device, self.dtype),
+                    "context_time_indices": context_time_indices,
+                }
             if self.config.inference.visualize:
                 visualize_depth(retrieved_info["depth"],
                                 visualization_dir=self.visualize_dir, 
@@ -656,9 +750,24 @@ class VMemPipeline:
             candidates = []
             for frame, count in frame_count:
                 candidates.extend([frame] * count)
-                indices_to_frame = {
-                    i: frame for i, frame in enumerate(candidates)
+
+            if len(candidates) == 0:
+                print("[get_context_info] no candidates, falling back to latest frame")
+                context_time_indices = [len(self.latents) - 1]
+                self._record_context_debug(context_time_indices, "fallback_latest_frame", target_c2ws)
+                context_data = prepare_context_data(context_time_indices)
+
+                (context_c2ws, context_latents, context_encoder_embeddings, context_Ks, context_time_indices) = context_data
+
+                return {
+                    "context_c2ws": torch.from_numpy(np.array(context_c2ws)).to(self.device, self.dtype),
+                    "context_latents": torch.stack(context_latents).to(self.device, self.dtype),
+                    "context_encoder_embeddings": torch.stack(context_encoder_embeddings).to(self.device, self.dtype),
+                    "context_Ks": torch.from_numpy(np.array(context_Ks)).to(self.device, self.dtype),
+                    "context_time_indices": context_time_indices,
                 }
+
+            indices_to_frame = {i: frame for i, frame in enumerate(candidates)}
                 
             # Sort candidates by distance to target view
             distances = [self.geodesic_distance(torch.from_numpy(average_c2w).to(self.device, self.dtype), 
@@ -698,6 +807,8 @@ class VMemPipeline:
                         self.initial_threshold = pairwise_distances[percentile_idx]
                     else:
                         self.initial_threshold = 1
+                elif not hasattr(self, "initial_threshold"):
+                    self.initial_threshold = 1.0
 
             
                 
@@ -751,6 +862,8 @@ class VMemPipeline:
             
             # Convert to tensor and maintain original order (don't reverse)
             context_time_indices = torch.from_numpy(np.array(selected_indices))
+            context_reason = "surfel_relevance"
+        self._record_context_debug(context_time_indices, context_reason, target_c2ws)
         context_data = prepare_context_data(context_time_indices)
             
         (context_c2ws, context_latents, context_encoder_embeddings, context_Ks, context_time_indices) = context_data
@@ -869,17 +982,28 @@ class VMemPipeline:
         # Create mask for valid points
         # depth threshold is the 95 percentile of the depth map
         depth_threshold = torch.quantile(depths, 0.999)
-        valid_mask = (depths <= depth_threshold) & (confs >= self.config.surfel.conf_thresh)
+        #valid_mask = (depths <= depth_threshold) & (confs >= self.config.surfel.conf_thresh)
+        valid_mask = (
+            (depths > 1e-6)
+            & torch.isfinite(depths)
+            & torch.isfinite(pointmap).all(dim=-1)
+            & torch.isfinite(confs)
+            & (depths <= depth_threshold)
+            & (confs >= self.config.surfel.conf_thresh)
+        )
         
         # Get positions, normals and depths for valid points
         positions = pointmap[valid_mask]  # [N, 3]
         normals = normal_map[valid_mask]  # [N, 3]
         valid_depths = depths[valid_mask]  # [N]
         
+        if positions.numel() == 0 or positions.ndim != 2 or positions.shape[1] != 3:
+            return []
+        
         # Calculate view directions for all valid points at once
         camera_pos = poses[0:3, 3]
         view_directions = positions - camera_pos.unsqueeze(0)  # [N, 3]
-        view_directions = F.normalize(view_directions, dim=1)  # [N, 3]
+        view_directions = F.normalize(view_directions, dim=1, eps=1e-8)  # [N, 3]
         
         # Calculate dot products between view directions and normals
         dot_products = torch.sum(view_directions * normals, dim=1)  # [N]
@@ -896,14 +1020,36 @@ class VMemPipeline:
         radii = (radius_scale * valid_depths / focal_lengths / adjustment_values)  # [N]
         
         # Convert to numpy only at the end
-        positions = positions.detach().cpu().numpy()
-        normals = normals.detach().cpu().numpy()
-        radii = radii.detach().cpu().numpy()
+        # positions = positions.detach().cpu().numpy()
+        # normals = normals.detach().cpu().numpy()
+        # radii = radii.detach().cpu().numpy()
         
-        # Create surfels list using list comprehension
-        surfels = [Surfel(pos, norm, rad) for pos, norm, rad in zip(positions, normals, radii)]
+        finite_mask = (
+            torch.isfinite(positions).all(dim=1)
+            & torch.isfinite(normals).all(dim=1)
+            & torch.isfinite(radii)
+            & (radii > 0)
+        )
 
-            
+        positions = positions[finite_mask]
+        normals = normals[finite_mask]
+        radii = radii[finite_mask]
+
+        if positions.numel() == 0:
+            print("[pointmap_to_surfels] no valid surfels after filtering")
+            return []
+
+        positions_np = positions.detach().cpu().numpy().astype(np.float32)
+        normals_np = normals.detach().cpu().numpy().astype(np.float32)
+        radii_np = radii.detach().cpu().numpy().astype(np.float32)
+
+        surfels = [
+            Surfel(pos, norm, float(rad))
+            for pos, norm, rad in zip(positions_np, normals_np, radii_np)
+        ]
+
+        print(f"[pointmap_to_surfels] generated {len(surfels)} surfels")
+        return surfels  
         
         return surfels
 
@@ -929,12 +1075,28 @@ class VMemPipeline:
                 v1 = p_right - p_center
                 v2 = p_down - p_center
                 
+                ''' 기존
                 v1 = v1 / torch.linalg.norm(v1)
                 v2 = v2 / torch.linalg.norm(v2)
                 
                 # Cross product in camera coordinates
                 n_c = torch.cross(v1, v2)
                 # n_c *= 1e10
+                '''
+                
+                v1_norm = torch.linalg.norm(v1)
+                v2_norm = torch.linalg.norm(v2)
+
+                if v1_norm < 1e-8 or v2_norm < 1e-8:
+                    continue
+
+                v1 = v1 / v1_norm
+                v2 = v2 / v2_norm
+
+                n_c = torch.linalg.cross(v1, v2, dim=0)
+                
+                if not torch.isfinite(n_c).all():
+                    continue
                 
                 # Compute norm of the normal vector
                 norm_len = torch.linalg.norm(n_c)
@@ -972,15 +1134,21 @@ class VMemPipeline:
             device: Device to run inference on
             only_last_frame: Whether to only process the last frame
         """
-        # Flip Y and Z components of camera poses to match dataset convention
-        c2ws_transformed = self.get_transformed_c2ws()
+        # Flip Y and Z components of camera poses to match dataset convention.
+        # Keep reconstruction inputs bounded and aligned with the image window.
+        num_input_images = len(input_images)
+        c2ws_window = self.c2ws[-num_input_images:]
+        c2ws_transformed = self.get_transformed_c2ws(c2ws_window)
+        depth_window = None
+        if len(self.surfel_depths) >= num_input_images:
+            depth_window = self.surfel_depths[-num_input_images:]
         
 
         scene = run_inference_from_pil(
             input_images,
             self.surfel_model,
             poses=c2ws_transformed,
-            depths=torch.from_numpy(np.array(self.surfel_depths)) if len(self.surfel_depths) > 0 else None,
+            depths=torch.from_numpy(np.array(depth_window)) if depth_window is not None else None,
             lr = lr,
             niter = niter,
             visualize=self.config.inference.visualize_pointcloud,
@@ -1023,7 +1191,8 @@ class VMemPipeline:
         
         # self.surfels = []
         # self.surfel_to_timestep = {}
-        start_idx = 0 if len(self.surfels) == 0 else len(pointcloud) - self.config.model.target_num_frames
+        scene_start_timestep = len(self.pil_frames) - len(input_images)
+        start_idx = 0 if len(self.surfels) == 0 else max(0, len(pointcloud) - self.config.model.target_num_frames)
         end_idx = len(pointcloud)
         # for frame_idx in range(len(pointcloud)):
         # Create surfels for the current frame
@@ -1041,7 +1210,7 @@ class VMemPipeline:
             if len(self.surfels) > 0:
                 surfels, self.surfel_to_timestep = self.merge_surfels(
                     new_surfels=surfels,
-                    current_timestep=frame_idx,
+                    current_timestep=scene_start_timestep + frame_idx,
                     existing_surfels=self.surfels,
                     existing_surfel_to_timestep=self.surfel_to_timestep,
                     # position_threshold=self.config.surfel.merge_position_threshold,
@@ -1053,7 +1222,7 @@ class VMemPipeline:
             num_surfels = len(surfels)
             surfel_start_index = len(self.surfels)
             for surfel_index in range(num_surfels):
-                self.surfel_to_timestep[surfel_start_index + surfel_index] = [frame_idx]
+                self.surfel_to_timestep[surfel_start_index + surfel_index] = [scene_start_timestep + frame_idx]
 
             # Save surfels if configured
             # if self.config.inference.save_surfels and len(self.surfels) > 0:
@@ -1205,45 +1374,44 @@ class VMemPipeline:
             List of all generated PIL frames
         """
 
-        padding_size = 0
-        # Determine generation steps based on trajectory length
-        generation_steps = (len(c2ws_tensor) + 1 - self.config.model.num_frames) // self.config.model.target_num_frames + 2
+        generated_start_idx = len(self.pil_frames)
+        total_target_poses = len(c2ws_tensor)
+        # Keep each autoregressive generation at the trained target chunk size.
+        generation_steps = int(np.ceil(total_target_poses / self.config.model.target_num_frames))
         
         # Generate frames in steps
         cur_start_idx = 0
+        next_start_idx = 0
         for i in range(generation_steps):
             # Calculate frame indices for this step
             if i > 0:
-                cur_start_idx = cur_end_idx
-            if len(self.pil_frames) == 1: # first frame
-                cur_end_idx = min(cur_start_idx + self.config.model.num_frames - 1, len(c2ws_tensor))
-            else:
-                cur_end_idx = min(cur_start_idx + self.config.model.target_num_frames, len(c2ws_tensor))
+                cur_start_idx = next_start_idx
+            cur_end_idx = min(cur_start_idx + self.config.model.target_num_frames, total_target_poses)
+            next_start_idx = cur_end_idx
             
             target_length = cur_end_idx - cur_start_idx
             if target_length <= 0:
                 break
-                
-            # Handle padding for target frames if needed
-            if target_length < self.config.model.target_num_frames or (len(self.pil_frames) == 1 and target_length < self.config.model.num_frames - 1):
-                # Pad target_c2ws and target_Ks with the last frame
-                if len(self.pil_frames) == 1: # first frame
-                    padding_size = self.config.model.num_frames - 1 - target_length
-                else:
-                    padding_size = self.config.model.target_num_frames - target_length
-                padding = torch.tile(c2ws_tensor[cur_end_idx-1:cur_end_idx], (padding_size, 1, 1))
-                c2ws_tensor = torch.cat([c2ws_tensor, padding], dim=0)
-                
-                padding_K = torch.tile(Ks_tensor[cur_end_idx-1:cur_end_idx], (padding_size, 1, 1))
-                Ks_tensor = torch.cat([Ks_tensor, padding_K], dim=0)
-                
-                if len(self.pil_frames) == 1:
-                    cur_end_idx = cur_start_idx + self.config.model.num_frames - 1
-                else:
-                    cur_end_idx = cur_start_idx + self.config.model.target_num_frames
-            
+
             target_c2ws = c2ws_tensor[cur_start_idx:cur_end_idx]
             target_Ks = Ks_tensor[cur_start_idx:cur_end_idx]
+            real_target_length = target_length
+
+            # The model expects 1 context + 7 targets on the first call, and
+            # then 4 targets thereafter. Only the real trajectory frames are
+            # stored; padded targets are repeated endpoint poses.
+            required_targets = (
+                self.config.model.num_frames - 1
+                if len(self.pil_frames) == 1
+                else self.config.model.target_num_frames
+            )
+            padding_size = max(0, required_targets - real_target_length)
+            if padding_size > 0:
+                padding = torch.tile(target_c2ws[-1:], (padding_size, 1, 1))
+                target_c2ws = torch.cat([target_c2ws, padding], dim=0)
+
+                padding_K = torch.tile(target_Ks[-1:], (padding_size, 1, 1))
+                target_Ks = torch.cat([target_Ks, padding_K], dim=0)
             
  
             context_info = self.get_context_info(target_c2ws, use_non_maximum_suppression)
@@ -1290,7 +1458,7 @@ class VMemPipeline:
             target_encoder_embeddings = encode_image(target_samples, self.image_encoder, self.device, self.dtype)
             target_latents = samples_z[~input_masks]
             
-            for j in range(target_num - padding_size if padding_size > 0 else target_num):
+            for j in range(real_target_length):
                 self.latents.append(target_latents[j].detach().cpu().numpy())
                 self.encoder_embeddings.append(target_encoder_embeddings[j].detach().cpu().numpy())
                 self.Ks.append(target_Ks[j].detach().cpu().numpy())
@@ -1302,7 +1470,12 @@ class VMemPipeline:
             
             # Update scene reconstruction if needed
      
-            self.construct_and_store_scene(self.pil_frames, 
+            max_scene_frames = (
+                self.config.model.context_num_frames
+                + self.config.model.target_num_frames
+            )
+            scene_frames = self.pil_frames[-max_scene_frames:]
+            self.construct_and_store_scene(scene_frames,
                                         time_indices=context_time_indices,
                                         niter=self.config.surfel.niter, 
                                         lr=self.config.surfel.lr, 
@@ -1312,8 +1485,7 @@ class VMemPipeline:
             if self.config.inference.visualize:
                 export_to_gif(self.pil_frames, f"{self.config.visualization_dir}/inference_all.gif")
             
-        # Return all frames or just the new ones
-        return self.pil_frames[-self.config.model.target_num_frames:] if len(self.pil_frames) > self.config.model.target_num_frames + 1 else self.pil_frames
+        return self.pil_frames[generated_start_idx:]
     
     def generate_trajectory_frames(self, c2ws: List[np.ndarray], Ks: List[np.ndarray], use_non_maximum_suppression=None):
         """
@@ -1333,7 +1505,7 @@ class VMemPipeline:
         
         return self._generate_frames_for_trajectory(c2ws_tensor, Ks_tensor, use_non_maximum_suppression)
     
-    def undo_latest_move(self):
+    def undo_latest_move(self, num_frames=None):
         """
         Undo the latest move by deleting the most recent batch of camera poses, embeddings, and pil images.
         This allows stepping back in the trajectory if navigation went in an undesired direction.
@@ -1350,8 +1522,10 @@ class VMemPipeline:
             print("Cannot undo: only one frame in the pipeline")
             return False
         
-        # Determine how many frames to remove - up to target_num_frames
-        frames_to_remove = min(self.config.model.target_num_frames, len(self.pil_frames) - 1)
+        # Determine how many frames to remove.
+        if num_frames is None:
+            num_frames = self.config.model.target_num_frames
+        frames_to_remove = min(int(num_frames), len(self.pil_frames) - 1)
         
         # Remove the latest entries from all state lists
         for _ in range(frames_to_remove):
