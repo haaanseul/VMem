@@ -119,6 +119,30 @@ PSNR은 surfel 25.25 dB, recent 6.62 dB였다. Surfel도 exploration 중 구조 
 논문 길이에 가까운 local diagnostic이지 공식 RealEstate10K/Tanks-and-Temples
 재현은 아니다.
 
+### 4.1 공식 공개 데모 A/B 감사
+
+사용자가 서버 수정 때문에 출력이 깨졌는지 확인하기 위해 저자 공식 GitHub
+`runjiali-rl/vmem` commit `39291e4`를 별도 source snapshot으로 실행했다.
+
+- 공식 source의 폐기된 VAE ID는 현재 접근 가능한 SD2.1 mirror로 runtime 치환
+- Oxford, seed 42, 576², 50 steps, K=4/M=4, interpolation 4 유지
+- 공식 `20° Veer` button은 code상 실제 10° 회전하므로 동일하게 재현
+- 공식 원본 9-frame cycle과 현재 crash-safe/full-history 9-frame cycle은
+  PNG와 MP4가 pixel-identical
+- 공식 원본은 13-image CUT3R reconstruction에서 degenerate Octree recursion으로
+  crash
+- 현재 crash-safe code는 recent-8/full-history 모두 25-frame cycle을 완료했고
+  final exact PSNR은 각각 25.19/25.22 dB
+
+따라서 짧은 공개 데모에 대해서는 현재 server/state/crash 수정이 생성 품질을
+망가뜨렸다는 증거가 없다. Octree와 VAE 수정은 오히려 현재 환경에서 공식 source를
+실행하기 위해 필요했다.
+
+공식식 누적 memory write를 별도로 확인할 수 있도록
+`VMEM_SCENE_RECONSTRUCTION_MODE=full_history`를 추가했다. 기본
+`recent_window`는 서버 안정성을 유지한다. 전체 감사와 실행 명령은
+`PAPER_DEMO_REPRODUCTION.md`에 기록한다.
+
 ### 5. 배포 및 의존성 변경
 
 - CUT3R 소스를 `extern/CUT3R`에 포함해 다른 서버에서도 같은 코드로 실행할 수 있게 했다.

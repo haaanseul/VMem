@@ -4,9 +4,9 @@
 
 ## 결론부터
 
-현재 직접 확인할 가치가 있는 MP4는 `experiments/results/long_cycle/` 아래의
-4개뿐이다. 모두 `test_samples/oxford.jpg`, seed 42, 576×576, 12 FPS,
-checked-in 50-step sampler로 실제 GPU 생성한 영상이다.
+장기 stress-test MP4 4개는 `experiments/results/long_cycle/` 아래에 있다.
+논문 공개 demo code가 현재 수정 때문에 깨졌는지 확인하는 MP4 3개는
+`experiments/results/paper_demo_ab/` 아래에 있다. 모두 실제 GPU로 생성했다.
 
 기존 `dry_run`, `overnight`, `long_cycle_smoke`의 MP4 63개는 삭제했다. 이 영상들은
 3–15 frames의 실행 검증용 영상이라 장기 동작을 눈으로 판단하는 데 적합하지 않았다.
@@ -173,8 +173,16 @@ test**였다. `forward 1회 → backward 1회`로 입력을 포함해 3 frames�
 - `experiments/results/long_cycle_smoke/**/revisit.mp4`: 1개
 
 총 63개, 약 3.56 MiB다. 이 파일들은 Git에 포함되지 않은 재생성 가능한 출력이다.
-삭제 후 남은 MP4는 위 장기 영상 4개뿐이다. 실험 directory와 분석 자료는 삭제하지
-않았다.
+해당 정리 직후에는 위 장기 영상 4개만 남겼다. 이후 논문 데모 재현 점검을 위해
+다음 3개를 추가했다.
+
+- `paper_demo_ab/official_short/revisit.mp4`: 공식 원본이 완료한 9-frame run
+- `paper_demo_ab/current_full_history/revisit.mp4`: crash-safe code + 공식 write
+- `paper_demo_ab/current_recent8/revisit.mp4`: crash-safe code + 서버 기본 write
+
+공식 원본과 pixel-identical한 9-frame 현재-code 중복 MP4는 삭제했다. 자세한
+조건과 결과는 `PAPER_DEMO_REPRODUCTION.md`에 있다. 실험 directory와 분석 자료는
+삭제하지 않았다.
 
 ## 논문 영상 재현 여부
 

@@ -153,6 +153,12 @@ The four retained videos, recommended viewing order, deleted smoke videos, and
 the distinction between `--plan-only` and a minimal GPU dry run are documented
 in [VIDEO_GUIDE.md](VIDEO_GUIDE.md).
 
+For a direct audit of the official GitHub/Hugging Face demo path, including a
+pixel-identical 9-frame reference and the official source's reproduced Octree
+crash, see [PAPER_DEMO_REPRODUCTION.md](PAPER_DEMO_REPRODUCTION.md). The
+crash-safe app can use the paper demo's full-history CUT3R write behavior with
+`VMEM_SCENE_RECONSTRUCTION_MODE=full_history`.
+
 Each run writes frames, an MP4, actual camera poses, strict JSON/JSONL memory
 traces, a summary CSV, context images, contact sheets, and a manual-label
 manifest below its `--output-dir`. Large outputs under `experiments/results/`
