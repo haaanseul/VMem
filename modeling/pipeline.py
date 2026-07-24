@@ -1594,11 +1594,24 @@ class VMemPipeline:
             
             # Update scene reconstruction if needed
      
-            max_scene_frames = (
-                self.config.model.context_num_frames
-                + self.config.model.target_num_frames
+            scene_reconstruction_mode = self.config.inference.get(
+                "scene_reconstruction_mode",
+                "recent_window",
             )
-            scene_frames = self.pil_frames[-max_scene_frames:]
+            if scene_reconstruction_mode == "full_history":
+                scene_frames = self.pil_frames
+            elif scene_reconstruction_mode == "recent_window":
+                max_scene_frames = (
+                    self.config.model.context_num_frames
+                    + self.config.model.target_num_frames
+                )
+                scene_frames = self.pil_frames[-max_scene_frames:]
+            else:
+                raise ValueError(
+                    "inference.scene_reconstruction_mode must be "
+                    "'recent_window' or 'full_history', got "
+                    f"{scene_reconstruction_mode!r}"
+                )
             self.construct_and_store_scene(scene_frames,
                                         time_indices=context_time_indices,
                                         niter=self.config.surfel.niter, 
