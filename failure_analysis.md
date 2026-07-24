@@ -4,6 +4,24 @@
 
 이 문서는 실제로 완료한 GPU dry run만 기록한다. 결과 영상과 frame은 `experiments/results/` 아래에 있으며 Git에는 포함하지 않는다.
 
+## 중요 교정: 최초 57-run은 장기 영상 재현이 아니었다
+
+최초 overnight matrix의 영상 길이를 다시 감사한 결과, 57개 run의 총 frame 수는
+256개, run당 평균은 4.49개였다. 57개 중 44개가 입력을 포함해 4 frames 이하였고
+최장 run도 15 frames였다. 12 FPS MP4 기준 대표 영상 길이는 0.25–1.25초였다.
+
+원인은 matrix가 instrumentation과 intervention을 최소 비용으로 검증하기 위해
+`interp_frames=1`, 기본 `movement_steps=1`, 이동 거리 0.1을 사용했기 때문이다.
+따라서 아래 overnight 결과는 다음 범위로만 해석한다.
+
+- conditioning source와 component에 대한 micro-ablation
+- 짧은 exact-pose routing 검증
+- headless logging과 intervention 구현 검증
+
+이를 논문의 long-term/cycle trajectory 재현 또는 장기 영상 증거라고 표현하지 않는다.
+특히 contamination follow-up도 총 5 frames이므로 장기 contamination이 아니라 두
+follow-up call 동안 유지된 단기 propagation이다.
+
 ## 실행 조건
 
 - scene: `test_samples/living_room.jpg`
@@ -169,3 +187,107 @@ wrong/mixed degradation이 intervention 종료 후에도 거의 그대로 남았
 - latent reliability score 또는 rejection 기준 자체의 설계와 검증
 
 현재 결과만으로 VMem 전체나 논문의 공식 benchmark에 대한 결론을 내리지 않는다.
+
+## Long-form local cycle follow-up
+
+짧은 영상 문제를 교정하기 위해 `test_samples/oxford.jpg`, seed 42에서 실제 연속
+camera motion을 생성하는 두 trajectory를 `surfel`과 `recent`로 각각 실행했다.
+모든 run은 checked-in 50-step sampler를 사용했다.
+
+### Trajectory
+
+`yaw_cycle`은 10도 yaw command를 9회 실행해 90도까지 회전한 뒤, -10도 command
+9회로 같은 pose들을 역순으로 복귀했다. Command마다 7 interpolation frames를
+생성해 입력 포함 127 frames가 됐다.
+
+`long_reverse_cycle`은 다음 54-command outbound path를 생성한 뒤 모든 command를
+정확히 역연산했다.
+
+```text
+forward × 6
+→ yaw +5° × 18
+→ forward × 6
+→ yaw -5° × 18
+→ forward × 6
+→ exact reverse path
+```
+
+Command마다 4 interpolation frames를 생성해 입력 포함 433 frames가 됐다.
+최종 rotation error는 두 mode 모두 0도였고 translation error는 약 `1.49e-9`였다.
+
+### 평가 방법
+
+Endpoint initial-vs-final PSNR만 보지 않고, return의 모든 frame을 outbound에서
+camera pose가 가장 가까운 frame과 매칭했다. 각 pair에 PSNR/MAE와 pose error를
+저장하고 평균·중앙값·최솟값을 계산했다. 결과는 각 run의 `cycle_pairs.json`,
+`cycle_pairs.csv`, `cycle_pair_contact_sheet.jpg`와 상위
+`long_cycle_analysis.json`/`.md`에 저장했다.
+
+이 방식은 논문이 return trajectory의 여러 지점에서 측정하는 취지를 따른다.
+다만 local synthetic command trajectory이므로 공식 RealEstate10K metric은 아니다.
+127-frame return의 pose matching 오차는 회전 최대 `0.0194°`, 이동 `0`이었고,
+433-frame return은 회전 최대 `0.0201°`, 이동 최대 `1.49e-8`이었다. 따라서 아래
+paired score는 단순히 비슷한 순서의 frame이 아니라 실질적으로 같은 camera pose의
+outbound/return frame을 비교한 값이다.
+
+### 실제 결과
+
+| Trajectory | Context | Frames | Generation calls | Return paired PSNR 평균 | Final exact PSNR | Fallback | Auto flags |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| yaw cycle | surfel | 127 | 36 | 22.63 dB | 19.65 dB | 1 | 0 |
+| yaw cycle | recent | 127 | 36 | 14.29 dB | 9.88 dB | 0 | 0 |
+| long reverse cycle | surfel | 433 | 108 | 18.97 dB | 25.25 dB | 0 | 2 |
+| long reverse cycle | recent | 433 | 108 | 12.30 dB | 6.62 dB | 0 | 0 |
+
+Yaw cycle에서 surfel은 약 frame 18부터 큰 검은 직사각형 형태의 구조가 생성되어
+중간 view를 오염시켰다. Return 후반에는 과거 spatial context를 다시 찾으면서
+원래 회랑을 상당 부분 복구했고 final exact PSNR은 19.65 dB였다. Recent는 같은
+구조 붕괴 이후 복구하지 못하고 원래 scene과 다른 기하 구조로 끝났다.
+
+433-frame long reverse cycle에서 두 방법 모두 outbound 중간에 심각한 구조 왜곡이
+발생했다. Surfel은 대략 frame 61–164와 267–377 구간에 큰 distortion이 보였지만,
+저장된 spatial memory가 다시 관련 view를 제공하는 구간에서 회랑 구조를 반복적으로
+복구했고 final exact PSNR은 25.25 dB였다. Recent는 대략 frame 34 이후 원래 회랑을
+잃고 밝은 실내 형태의 다른 scene으로 drift했으며 final exact PSNR은 6.62 dB였다.
+
+자동 validity heuristic은 127-frame 두 run의 명백한 collapse를 모두 0건으로
+판정했고, 433-frame recent의 전면적인 scene drift도 0건으로 판정했다. 따라서
+black/NaN/saturation 중심 heuristic은 구조 붕괴 탐지에 사용할 수 없다.
+Contact sheet에서 확인한 구간은 이 문서에 기록했으며, frame별
+`manual_labels.csv`는 아직 사람이 채우지 않은 template 상태다.
+
+### 새 판단
+
+장기 결과는 다음 두 사실을 동시에 보여준다.
+
+1. Backbone autoregressive rollout은 memory mode와 무관하게 novel region에서
+   빠르게 구조적으로 붕괴할 수 있다.
+2. Surfel memory는 붕괴 자체를 막지는 못하지만, 과거 pose를 다시 방문할 때
+   scene을 복구하는 능력이 recent보다 현저히 높다.
+
+따라서 현재 가장 먼저 연구할 문제는 “VMem이 long-term에서 작동하지 않는다”가
+아니다. 더 정확한 질문은 다음과 같다.
+
+> Spatial memory가 exact revisit recovery에는 강하지만, 중간 exploration에서
+> 생성된 low-quality memory를 어떻게 감지하고 기록·재사용하지 않게 할 것인가?
+
+Wrong-memory micro-ablation은 reliability 연구의 controlled evidence로 남지만,
+앞으로는 127/433-frame natural rollout에서 실제로 붕괴한 frame의 provenance,
+write 시점, 이후 retrieval 여부를 중심으로 intervention을 설계해야 한다.
+
+### 논문 재현과의 관계
+
+이번 433-frame 영상은 논문 Fig. 5의 270–401-frame sequence 및 Fig. 6의
+400-frame 이상 cycle과 길이 면에서는 비슷해졌고, outbound path를 역순으로
+복귀하는 Sec. 4.3의 핵심 protocol을 따른다.
+
+그러나 다음 차이 때문에 공식 재현은 아니다.
+
+- input은 RealEstate10K/Tanks-and-Temples sequence가 아닌 단일 Oxford 이미지다.
+- camera는 dataset ground truth가 아닌 synthetic forward/yaw command다.
+- 논문의 10-frame subsampling과 공식 test split을 사용하지 않았다.
+- LPIPS/SSIM/FID와 DUSt3R Rdist/Tdist를 아직 계산하지 않았다.
+- checked-in CFG 2와 서버용 recent-8 CUT3R write 제한을 유지했다.
+
+따라서 이 결과는 **paper-length local cycle diagnostic**으로 표기하고, 논문
+Table 1–4 재현값으로 사용하지 않는다.

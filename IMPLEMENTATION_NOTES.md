@@ -1,6 +1,6 @@
 # VMem 구현 메모: 논문 기준과 현재 작업 트리의 차이
 
-마지막 확인: 2026-07-23
+마지막 확인: 2026-07-24
 
 ## 이 문서의 목적
 
@@ -98,6 +98,27 @@
 
 일부 `open_door`와 rotation run에는 surfel fallback이 있었으며 `failure_analysis.md`는 전체 평균과 fallback-free subset을 분리한다. 생성 결과와 집계 JSON은 계속 `experiments/results/` 아래에만 두고 Git에 포함하지 않는다.
 
+이후 영상 길이를 다시 감사한 결과, 57-run은 총 256 frames, run당 평균 4.49
+frames였고 44/57개가 4 frames 이하였다. 이는 intervention과 logging 검증용
+micro-ablation이며 논문형 long-term 영상 재현이 아니다.
+
+이를 교정하기 위해 다음 long-form local cycle을 별도로 추가하고 실제 실행했다.
+
+- `yaw_cycle`: 127 frames, 90도 outbound 후 exact reverse
+- `long_reverse_cycle`: 433 frames, translation/rotation이 섞인 216-frame outbound
+  후 exact reverse
+- `surfel`과 `recent`를 같은 Oxford image/seed/pose에서 비교
+- return의 모든 frame을 outbound의 동일 pose frame과 매칭하는 paired cycle metric
+
+127-frame paired PSNR 평균은 surfel 22.63 dB, recent 14.29 dB였고,
+433-frame에서는 surfel 18.97 dB, recent 12.30 dB였다. 433-frame final exact
+PSNR은 surfel 25.25 dB, recent 6.62 dB였다. Surfel도 exploration 중 구조 붕괴를
+막지는 못했지만 exact revisit recovery는 recent보다 명확히 우수했다.
+
+이 long-form suite도 단일 Oxford image와 synthetic command trajectory를 사용하므로
+논문 길이에 가까운 local diagnostic이지 공식 RealEstate10K/Tanks-and-Temples
+재현은 아니다.
+
 ### 5. 배포 및 의존성 변경
 
 - CUT3R 소스를 `extern/CUT3R`에 포함해 다른 서버에서도 같은 코드로 실행할 수 있게 했다.
@@ -115,8 +136,8 @@
 - Torchvision: 0.22.0+cu126
 - Gradio: 6.15.2
 - 필수 VMem, CUT3R, VAE, CLIP 가중치 다운로드 완료
-- 서버: tmux session `vmem-server`, `0.0.0.0:7860`
-- HTTP root와 Gradio config endpoint에서 200 응답 확인
+- Gradio 서버: 평가 완료 후 사용자 요청에 따라 `vmem-server` tmux session 종료
+- 현재 장기 실험도 모두 종료되어 VMem GPU process 없음
 
 주의: 문서의 과거 로컬 환경 설명과 `requirements.txt`의 CUDA 12.4 index, 현재 설치된 CUDA 12.6 wheel이 서로 다르다. 현재 서버는 동작하지만 새 서버 재현 시에는 설치된 torch build를 다시 확인해야 한다.
 

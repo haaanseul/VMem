@@ -107,7 +107,8 @@ novel-view accuracy가 아니다.
 
 자동 validity check는 NaN/Inf, black frame, saturation, 급격한 pixel 변화,
 near-duplicate를 찾았다. Rotation의 구조 붕괴는 이 heuristic이 잡지 못해 contact
-sheet를 직접 확인하고 manual manifest에 표시했다.
+sheet를 직접 확인하고 이 문서와 `failure_analysis.md`에 기록했다. 각 run에
+`manual_labels.csv` template은 생성됐지만 frame별 수동 label은 아직 채우지 않았다.
 
 ## 0.1 논문 재현 테스트는 무엇을 기반으로 했는가
 
@@ -234,6 +235,55 @@ python scripts/analyze_revisit_matrix.py \
 9. 현재 recent-8 CUT3R write 제한과 navigation NMS 변경을 원 논문 경로로
    되돌린 별도 branch/config에서 실행한다.
 10. 논문 Table 1–4 수치와 평균, sample 수, 실패율을 함께 비교한다.
+
+## 0.2 장기 영상 교정 실험
+
+최초 57-run이 대부분 2–4 frames인 micro-ablation이었다는 문제를 확인한 뒤,
+별도의 long-form local cycle을 실제 실행했다. 이 결과는 이전 짧은 test보다 연구
+방향 판단에 우선한다.
+
+| Trajectory | Context | Frames | Return paired PSNR 평균 | Final exact PSNR |
+| --- | --- | ---: | ---: | ---: |
+| 90° yaw-and-return | surfel | 127 | 22.63 dB | 19.65 dB |
+| 90° yaw-and-return | recent | 127 | 14.29 dB | 9.88 dB |
+| multi-segment exact reverse | surfel | 433 | 18.97 dB | 25.25 dB |
+| multi-segment exact reverse | recent | 433 | 12.30 dB | 6.62 dB |
+
+127-frame cycle은 10도 yaw를 9회 실행한 뒤 정확히 역방향으로 돌아왔다.
+433-frame cycle은 세 translation segment와 두 90도 turn으로 216-frame outbound를
+만들고 모든 camera command를 역순·역부호로 실행했다.
+
+평균 paired PSNR은 return의 모든 frame을 같은 outbound camera pose의 frame과
+비교한 값이다. Endpoint 하나만 높아도 중간 revisit가 망가질 수 있기 때문에
+endpoint PSNR과 분리했다.
+
+실제 영상에서는 다음 현상이 확인됐다.
+
+- 두 context mode 모두 novel region exploration 중 구조적으로 붕괴했다.
+- Surfel도 붕괴를 방지하지는 못했다.
+- Surfel은 과거 view가 다시 보이는 pose에 도달할 때 원래 scene을 반복적으로
+  복구했다.
+- Recent는 drift한 frame만 context로 사용하면서 원래 scene을 잃었고, exact
+  initial pose로 돌아와도 복구하지 못했다.
+- 433-frame recent는 명백하게 다른 실내 scene으로 drift했지만 자동 validity
+  heuristic은 failure를 0건으로 판정했다.
+
+따라서 현재 증거는 “memory를 켜면 exploration이 더 빨리 무너진다”보다 반대에
+가깝다. Backbone collapse는 두 mode에서 발생하지만, surfel memory는 exact/known
+view recovery에 실질적으로 기여한다.
+
+이 결과에 따라 reliability 연구의 초점도 수정한다. Primary failure는
+**autoregressive backbone collapse**이고, spatial memory는 이를 완전히 막지 못하지만
+revisit recovery를 제공한다. Reliability-aware read/write의 목적은 VMem을
+대체하는 것이 아니라 다음 두 문제를 줄이는 것이어야 한다.
+
+1. 이미 붕괴한 generated frame을 trusted spatial memory로 승격하지 않는다.
+2. 복귀 시 clean past view와 corrupted descendant가 함께 검색될 때 clean memory를
+   우선한다.
+
+장기 영상과 분석은 `experiments/results/long_cycle/`에 있고 Git에서는 제외한다.
+이 실험도 Oxford 단일 이미지와 synthetic camera command를 사용했으므로
+paper-length local diagnostic이지 공식 benchmark reproduction은 아니다.
 
 ## 1. 현재 결과가 말해주는 것
 

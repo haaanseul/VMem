@@ -237,3 +237,37 @@ conda run --no-capture-output -n vmem \
 - wrong memory가 output에 거의 영향을 주지 않음
 - recent baseline이 모든 조건에서 일관되게 해결
 - 한 scene/seed에서만 재현되고 다른 최소 scene에서 사라짐
+
+## 11. 장기 영상 교정 계획 및 실행
+
+최초 matrix는 intervention을 빠르게 분리하기 위한 micro-ablation이었고, 57개 중
+44개 run이 입력 포함 4 frames 이하였다. 따라서 이 matrix와 논문형 long-term
+cycle을 분리했다.
+
+추가한 local long-form protocol은 다음과 같다.
+
+- `yaw_cycle`: 90도 회전 후 같은 yaw path를 역순 복귀, 127 frames
+- `long_reverse_cycle`: translation과 두 turn으로 구성한 216-frame outbound 후
+  모든 command를 역순 복귀, 총 433 frames
+- 동일 Oxford image/seed에서 `surfel`과 `recent` 비교
+- return의 모든 frame을 같은 outbound camera pose와 비교
+
+실행 명령:
+
+```bash
+conda run --no-capture-output -n vmem \
+  python scripts/run_long_revisit_suite.py \
+  --groups yaw long \
+  --modes surfel recent \
+  --scene test_samples/oxford.jpg \
+  --output-dir experiments/results/long_cycle
+
+conda run --no-capture-output -n vmem \
+  python scripts/analyze_long_revisit.py \
+  --results-dir experiments/results/long_cycle
+```
+
+이 protocol은 논문 Fig. 5/6과 비슷한 frame 길이 및 Sec. 4.3의 reverse-cycle
+개념을 사용하지만, dataset GT camera가 아닌 synthetic command trajectory다.
+공식 재현을 위해서는 RealEstate10K/Tanks-and-Temples data와 paper config/metric을
+별도로 준비해야 한다.

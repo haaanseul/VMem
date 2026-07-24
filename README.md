@@ -118,6 +118,37 @@ python scripts/analyze_revisit_matrix.py \
 
 This writes `analysis.json` and `analysis.md` beside the ignored run outputs.
 
+### Long-form local cycle diagnostics
+
+The 57-run intervention matrix is intentionally a micro-ablation: most runs
+contain only 2–4 frames. Do not use its MP4 files as long-term paper
+reproductions. Use the separate long-form suite for visually meaningful local
+cycles:
+
+```bash
+python scripts/run_long_revisit_suite.py \
+  --groups yaw long \
+  --modes surfel recent \
+  --scene test_samples/oxford.jpg \
+  --output-dir experiments/results/long_cycle
+```
+
+The yaw cycle contains 127 frames. The multi-segment cycle contains 433 frames,
+uses 216 outbound frames, and then follows the exact reverse camera path. Runs
+are sequential and resumable.
+
+Compare every return frame with the frame at its matching outbound camera pose:
+
+```bash
+python scripts/analyze_long_revisit.py \
+  --results-dir experiments/results/long_cycle
+```
+
+This writes per-run `cycle_pairs.json`/`.csv`, paired contact sheets, and an
+aggregate `long_cycle_analysis.md`. These command-generated Oxford-image runs
+match the paper's qualitative sequence length and reverse-cycle concept, but
+they are not the official RealEstate10K or Tanks-and-Temples benchmark.
+
 Each run writes frames, an MP4, actual camera poses, strict JSON/JSONL memory
 traces, a summary CSV, context images, contact sheets, and a manual-label
 manifest below its `--output-dir`. Large outputs under `experiments/results/`
