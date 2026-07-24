@@ -47,6 +47,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--movement-steps", type=int, default=1)
     parser.add_argument("--yaw-step", type=float, default=15.0)
     parser.add_argument("--interp-frames", type=int, default=1)
+    parser.add_argument(
+        "--cycle-yaw-steps",
+        type=int,
+        default=9,
+        help="Outbound and return command count for the yaw_cycle trajectory.",
+    )
+    parser.add_argument(
+        "--cycle-turn-degrees",
+        type=float,
+        default=90.0,
+        help="Turn magnitude used by each bend of long_reverse_cycle.",
+    )
     parser.add_argument("--revisit-gap", choices=tuple(GAP_REPETITIONS), default="short")
     parser.add_argument("--revisit-yaw-offset", type=float, default=10.0)
     parser.add_argument(
@@ -145,6 +157,10 @@ def main() -> None:
         return
     if args.interp_frames < 1:
         raise ValueError("--interp-frames must be at least 1")
+    if args.cycle_yaw_steps < 1:
+        raise ValueError("--cycle-yaw-steps must be at least 1")
+    if args.cycle_turn_degrees <= 0:
+        raise ValueError("--cycle-turn-degrees must be positive")
     if args.wrong_slot_count is not None and args.wrong_slot_count < 0:
         raise ValueError("--wrong-slot-count must be non-negative")
     if args.wrong_slot_count is not None and args.wrong_slot_indices is not None:
@@ -163,6 +179,8 @@ def main() -> None:
         revisit_gap=args.revisit_gap,
         revisit_yaw_offset=args.revisit_yaw_offset,
         rotation_schedule=args.rotation_schedule,
+        cycle_yaw_steps=args.cycle_yaw_steps,
+        cycle_turn_degrees=args.cycle_turn_degrees,
     )
     run_config = {
         "scene": str(scene_path.relative_to(ROOT)),
@@ -174,6 +192,8 @@ def main() -> None:
         "movement_steps": args.movement_steps,
         "yaw_step": args.yaw_step,
         "interp_frames": args.interp_frames,
+        "cycle_yaw_steps": args.cycle_yaw_steps,
+        "cycle_turn_degrees": args.cycle_turn_degrees,
         "revisit_gap": args.revisit_gap,
         "revisit_yaw_offset": args.revisit_yaw_offset,
         "rotation_schedule": args.rotation_schedule,

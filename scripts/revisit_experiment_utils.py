@@ -18,6 +18,8 @@ TRAJECTORIES = (
     "rotation_accumulation",
     "revisit_gap",
     "contamination_followup",
+    "yaw_cycle",
+    "long_reverse_cycle",
 )
 ROTATION_SCHEDULES = {
     "90x1": (90.0, 1),
@@ -56,6 +58,8 @@ def build_trajectory(
     revisit_gap: str,
     revisit_yaw_offset: float,
     rotation_schedule: str,
+    cycle_yaw_steps: int = 9,
+    cycle_turn_degrees: float = 90.0,
 ) -> list[dict]:
     if name not in TRAJECTORIES:
         raise ValueError(f"Unknown trajectory {name!r}")
@@ -65,6 +69,12 @@ def build_trajectory(
         raise ValueError(f"Unknown revisit gap {revisit_gap!r}")
     if rotation_schedule not in ROTATION_SCHEDULES:
         raise ValueError(f"Unknown rotation schedule {rotation_schedule!r}")
+    if cycle_yaw_steps < 1:
+        raise ValueError("cycle_yaw_steps must be at least 1")
+    if yaw_step == 0:
+        raise ValueError("yaw_step must be non-zero")
+    if cycle_turn_degrees <= 0:
+        raise ValueError("cycle_turn_degrees must be positive")
 
     commands: list[dict] = []
 
@@ -108,7 +118,7 @@ def build_trajectory(
         elif name == "contamination_followup":
             add(f"yaw:{yaw_step:g}", "followup", "post-intervention yaw")
             add(f"yaw:{-yaw_step:g}", "followup", "post-intervention return")
-    else:
+    elif name == "rotation_accumulation":
         degrees, count = ROTATION_SCHEDULES[rotation_schedule]
         for step in range(count):
             add(
@@ -116,6 +126,43 @@ def build_trajectory(
                 "rotation_accumulation",
                 f"rotation partition {step + 1}/{count}",
             )
+    elif name == "yaw_cycle":
+        for step in range(cycle_yaw_steps):
+            add(
+                f"yaw:{yaw_step:g}",
+                "outbound",
+                f"yaw-cycle outbound {step + 1}/{cycle_yaw_steps}",
+            )
+        for step in range(cycle_yaw_steps):
+            add(
+                f"yaw:{-yaw_step:g}",
+                "revisit",
+                f"yaw-cycle return {step + 1}/{cycle_yaw_steps}",
+            )
+    else:
+        turn_steps = max(1, int(math.ceil(cycle_turn_degrees / abs(yaw_step))))
+        signed_turn_step = cycle_turn_degrees / turn_steps
+        outbound: list[str] = []
+        outbound.extend(["forward:1"] * movement_steps)
+        outbound.extend([f"yaw:{signed_turn_step:g}"] * turn_steps)
+        outbound.extend(["forward:1"] * movement_steps)
+        outbound.extend([f"yaw:{-signed_turn_step:g}"] * turn_steps)
+        outbound.extend(["forward:1"] * movement_steps)
+
+        for step, command in enumerate(outbound, start=1):
+            add(command, "outbound", f"long-cycle outbound {step}/{len(outbound)}")
+
+        for step, command in enumerate(reversed(outbound), start=1):
+            command_name, command_value = parse_command(command)
+            if command_name == "forward":
+                inverse = "backward:1"
+            elif command_name == "backward":
+                inverse = "forward:1"
+            elif command_name == "yaw" and command_value is not None:
+                inverse = f"yaw:{-command_value:g}"
+            else:
+                raise ValueError(f"Cannot invert long-cycle command {command!r}")
+            add(inverse, "revisit", f"long-cycle return {step}/{len(outbound)}")
 
     return commands
 
