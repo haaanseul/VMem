@@ -149,6 +149,10 @@ aggregate `long_cycle_analysis.md`. These command-generated Oxford-image runs
 match the paper's qualitative sequence length and reverse-cycle concept, but
 they are not the official RealEstate10K or Tanks-and-Temples benchmark.
 
+The four retained videos, recommended viewing order, deleted smoke videos, and
+the distinction between `--plan-only` and a minimal GPU dry run are documented
+in [VIDEO_GUIDE.md](VIDEO_GUIDE.md).
+
 Each run writes frames, an MP4, actual camera poses, strict JSON/JSONL memory
 traces, a summary CSV, context images, contact sheets, and a manual-label
 manifest below its `--output-dir`. Large outputs under `experiments/results/`
