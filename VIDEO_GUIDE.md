@@ -5,8 +5,9 @@
 ## 결론부터
 
 장기 stress-test MP4 4개는 `experiments/results/long_cycle/` 아래에 있다.
-논문 공개 demo code가 현재 수정 때문에 깨졌는지 확인하는 MP4 3개는
+공개 source code path가 현재 수정 때문에 깨졌는지 확인하는 MP4 3개는
 `experiments/results/paper_demo_ab/` 아래에 있다. 모두 실제 GPU로 생성했다.
+이 세 영상은 공식 홈페이지의 5.5초/165-frame Oxford MP4를 재현한 영상이 아니다.
 
 기존 `dry_run`, `overnight`, `long_cycle_smoke`의 MP4 63개는 삭제했다. 이 영상들은
 3–15 frames의 실행 검증용 영상이라 장기 동작을 눈으로 판단하는 데 적합하지 않았다.
@@ -176,11 +177,11 @@ test**였다. `forward 1회 → backward 1회`로 입력을 포함해 3 frames�
 해당 정리 직후에는 위 장기 영상 4개만 남겼다. 이후 논문 데모 재현 점검을 위해
 다음 3개를 추가했다.
 
-- `paper_demo_ab/official_short/revisit.mp4`: 공식 원본이 완료한 9-frame run
+- `paper_demo_ab/official_short/revisit.mp4`: 공개 source가 완료한 9-frame compatibility run
 - `paper_demo_ab/current_full_history/revisit.mp4`: crash-safe code + 공식 write
 - `paper_demo_ab/current_recent8/revisit.mp4`: crash-safe code + 서버 기본 write
 
-공식 원본과 pixel-identical한 9-frame 현재-code 중복 MP4는 삭제했다. 자세한
+공개 source와 pixel-identical한 9-frame 현재-code 중복 MP4는 삭제했다. 자세한
 조건과 결과는 `PAPER_DEMO_REPRODUCTION.md`에 있다. 실험 directory와 분석 자료는
 삭제하지 않았다.
 

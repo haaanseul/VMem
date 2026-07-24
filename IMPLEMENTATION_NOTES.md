@@ -119,7 +119,7 @@ PSNR은 surfel 25.25 dB, recent 6.62 dB였다. Surfel도 exploration 중 구조 
 논문 길이에 가까운 local diagnostic이지 공식 RealEstate10K/Tanks-and-Temples
 재현은 아니다.
 
-### 4.1 공식 공개 데모 A/B 감사
+### 4.1 공식 공개 source code A/B 감사
 
 사용자가 서버 수정 때문에 출력이 깨졌는지 확인하기 위해 저자 공식 GitHub
 `runjiali-rl/vmem` commit `39291e4`를 별도 source snapshot으로 실행했다.
@@ -134,9 +134,15 @@ PSNR은 surfel 25.25 dB, recent 6.62 dB였다. Surfel도 exploration 중 구조 
 - 현재 crash-safe code는 recent-8/full-history 모두 25-frame cycle을 완료했고
   final exact PSNR은 각각 25.19/25.22 dB
 
-따라서 짧은 공개 데모에 대해서는 현재 server/state/crash 수정이 생성 품질을
-망가뜨렸다는 증거가 없다. Octree와 VAE 수정은 오히려 현재 환경에서 공식 source를
-실행하기 위해 필요했다.
+따라서 동일한 9-frame 공개 code path에서는 현재 server/state/crash 수정이 생성
+pixel을 망가뜨렸다는 증거가 없다. Octree와 VAE 수정은 오히려 현재 환경에서 공식
+source를 실행하기 위해 필요했다.
+
+이 9/25-frame A/B는 공식 홈페이지의 Oxford 비교 MP4 재현이 아니다. 홈페이지
+with/without 영상은 각각 768×576, 30 FPS, 5.5초, 165 frames다. 논문과 공개
+source의 `M=4`에 비추면 약 41 generation batch에 해당할 가능성이 높지만,
+이를 만든 exact camera pose/button sequence는 공개되어 있지 않다. 따라서
+홈페이지 영상과의 장기 품질 동등성은 별도 검증이 필요하다.
 
 공식식 누적 memory write를 별도로 확인할 수 있도록
 `VMEM_SCENE_RECONSTRUCTION_MODE=full_history`를 추가했다. 기본

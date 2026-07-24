@@ -4,8 +4,9 @@
 
 ## 결론
 
-현재 확인된 범위에서는 사용자가 수정한 서버 코드 때문에 짧은 논문 데모가
-깨졌다고 보기 어렵다.
+현재 확인된 범위에서는 사용자가 수정한 서버 코드 때문에 공개 code path의 짧은
+출력이 깨졌다고 보기 어렵다. 다만 아래 9/25-frame 테스트는 공식 홈페이지의
+5.5초 Oxford 영상을 재현한 것이 아니다.
 
 - 공식 원본과 현재 crash-safe 코드의 9-frame 결과는 pixel 단위로 완전히 같았다.
 - 현재 코드에서 공식식 full-history memory write와 서버용 recent-8 write를
@@ -17,8 +18,48 @@
 즉 현재의 VAE ID 변경과 Octree/CUT3R 방어 코드는 데모를 망가뜨린 변경이 아니라
 공개 원본을 현재 서버에서 실행 가능하게 만든 호환성·안정성 수정이다.
 
-이전에 확인한 127/433-frame 붕괴는 공식 UI의 짧은 사용 예를 재현한 결과가 아니라,
+이전에 확인한 127/433-frame 붕괴는 공식 홈페이지의 Oxford path를 재현한 결과가 아니라,
 generation을 의도적으로 오래 누적한 stress test의 결과다.
+
+## 정정: 공식 홈페이지 영상은 165 frames다
+
+공식 프로젝트 페이지의 기본 Oxford 비교 MP4를 직접 검사했다.
+
+| 항목 | With VMem | Without VMem |
+| --- | ---: | ---: |
+| 파일 | `video_2_pair/final_video_1_compressed.mp4` | `video_2_pair/final_video_2_compressed.mp4` |
+| 해상도 | 768×576 | 768×576 |
+| FPS | 30 | 30 |
+| 재생 시간 | 5.5초 | 5.5초 |
+| decoded frames | 165 | 165 |
+
+따라서 사용자가 말한 4–5초대 공식 영상은 실제로 공개되어 있다. 저장소의
+`assets/demo_teaser.gif` 전체는 59.63초짜리 편집 영상이며, 첫 Oxford 비교 구간에
+이 5초대 with/without sequence가 들어간다.
+
+중요한 점은 5.5초가 생성이 짧다는 뜻이 아니라는 것이다. 논문과 공개 code는 한
+번에 target `M=4` frames를 생성한다. 홈페이지 영상의 165 frames는
+`1 + 41 × 4`와 정확히 일치하므로, initial frame을 포함한 약 41회 autoregressive
+generation 결과일 가능성이 높다. 이 부분은 공개 pose log가 없어 frame count에
+근거한 추론이다. 같은 165 frames를 공개 app의 기본 13 FPS로 저장하면 약
+12.69초이며, 홈페이지는 30 FPS로 압축 재생한다.
+
+논문에는 이보다 긴 qualitative 결과가 나온다.
+
+- Fig. 5: in-the-wild 입력에서 선택 frame이 270–401까지인 long sequence
+- Sec. 4.3/Fig. 6: 출발 경로를 역순으로 돌아오는 400-frame 이상 cycle
+- RealEstate10K: 10-frame interval, 50th-frame short-term 및 200-frame 이상
+  long-term 평가
+- Tanks-and-Temples: 첫 50 frames로 cycle을 만들고 모든 return frame 평가
+
+그러나 논문, 프로젝트 페이지, 공개 GitHub 중 어디에도 Oxford 홈페이지 영상의
+camera pose sequence, UI button 순서, seed, raw generation FPS는 제공되지 않는다.
+홈페이지에는 완성된 MP4만 있고, 공개 app은 사용자가 탐색을 마친 뒤의 pose만
+저장할 수 있다.
+
+또한 홈페이지 MP4는 768×576/30 FPS인 반면 공개 app config는
+576×576/13 FPS다. 따라서 이 홈페이지 asset을 공개 app이 그대로 export한
+동일 설정 영상이라고 단정할 수 없다.
 
 ## 무엇을 기준으로 삼았는가
 
@@ -36,9 +77,10 @@ pipeline도 누적된 전체 `pil_frames`를 CUT3R reconstruction에 전달한�
 camera command/trajectory JSON은 없다. App은 사용자가 버튼을 누른 뒤에야 camera
 path를 저장할 수 있을 뿐, 논문 teaser의 기존 path를 제공하지 않는다.
 
-따라서 teaser GIF 자체를 동일 seed·동일 trajectory로 pixel 재현하는 것은 공개
-자료만으로 불가능하다. 이번 재현은 공식 example image와 공식 app의 실제
-Navigator/Pipeline/button code path를 재현한 것이다.
+따라서 홈페이지 MP4나 teaser GIF를 동일 seed·동일 trajectory로 pixel 재현하는
+것은 공개 자료만으로 불가능하다. 아래 테스트는 공식 example image와 공식 app의
+실제 Navigator/Pipeline/button code path가 현재 수정으로 달라졌는지 검사한
+compatibility audit이다.
 
 ## 재현 조건
 
@@ -80,7 +122,7 @@ sd2-community/stable-diffusion-2-1
 VAE architecture와 weight family를 바꾸기 위한 실험 수정이 아니라, 삭제된
 repository 경로를 현재 접근 가능한 community mirror로 바꾼 것이다.
 
-## 테스트 2: 공식 원본 9-frame 짧은 demo
+## 테스트 2: 공개 source의 9-frame compatibility path
 
 Trajectory:
 
@@ -109,7 +151,7 @@ Trajectory:
 이 차이는 Gradio video state의 initial-frame 중복을 없앤 것이며, pipeline에
 저장된 9 frames와 생성 pixel에는 차이가 없었다.
 
-## 테스트 3: 공식 원본 25-frame demo 시도
+## 테스트 3: 공개 source의 25-frame compatibility path 시도
 
 Trajectory:
 
@@ -168,8 +210,9 @@ CUT3R memory-write 입력만 비교했다.
 - surfel absolute timestep index 정합성
 - empty/NaN surfel과 degenerate Octree split 방어
 
-공식 9-frame run과 현재 full-history 9-frame run이 pixel-identical하므로, 이
-수정들이 짧은 demo generation을 바꾸었다는 증거는 없다.
+공개 source 9-frame run과 현재 full-history 9-frame run이 pixel-identical하므로,
+이 수정들이 같은 짧은 code path의 generation을 바꾸었다는 증거는 없다. 이
+결과만으로 165-frame 홈페이지 path의 품질 동등성을 주장하지 않는다.
 
 ### 실제 algorithm behavior가 다른 수정
 
@@ -196,13 +239,14 @@ surfel geometry에는 영향을 줄 수 있다.
 
 ## 어떤 영상을 보면 되는가
 
-### 공식 원본이 실제 완료한 영상
+### 공개 source code로 실제 완료한 compatibility 영상
 
 `experiments/results/paper_demo_ab/official_short/revisit.mp4`
 
 - 9 frames
 - 공식 GitHub pipeline/Navigator 사용
 - VAE ID만 호환
+- 홈페이지 165-frame MP4의 재현물이 아님
 
 ### 현재 code, 공식 full-history 방식
 
@@ -223,7 +267,7 @@ surfel geometry에는 영향을 줄 수 있다.
 9-frame 현재 full-history MP4는 공식 원본 영상과 pixel-identical이므로 중복
 영상으로 보존하지 않는다.
 
-## 논문식 데모 서버 실행
+## 공개 app 방식 서버 실행
 
 공식 memory-write 동작으로 Gradio를 실행하려면 다음을 사용한다.
 
