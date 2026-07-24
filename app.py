@@ -43,13 +43,25 @@ sys.excepthook = _log_unhandled_exception
 
 CONFIG_PATH = "configs/inference/inference.yaml"
 CONFIG = OmegaConf.load(CONFIG_PATH)
+SCENE_RECONSTRUCTION_MODE = os.environ.get(
+    "VMEM_SCENE_RECONSTRUCTION_MODE",
+    "recent_window",
+)
+if SCENE_RECONSTRUCTION_MODE not in {"recent_window", "full_history"}:
+    raise ValueError(
+        "VMEM_SCENE_RECONSTRUCTION_MODE must be 'recent_window' or "
+        f"'full_history', got {SCENE_RECONSTRUCTION_MODE!r}"
+    )
+CONFIG.inference.scene_reconstruction_mode = SCENE_RECONSTRUCTION_MODE
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(
     f"[VMem] device={DEVICE}, visualize={CONFIG.inference.visualize}, "
+    f"scene_reconstruction={SCENE_RECONSTRUCTION_MODE}, "
     f"crash_log={CRASH_LOG_PATH}, runtime_log={RUNTIME_LOG_PATH}"
 )
 log_event(
-    f"startup device={DEVICE} visualize={CONFIG.inference.visualize} pid={os.getpid()}"
+    f"startup device={DEVICE} visualize={CONFIG.inference.visualize} "
+    f"scene_reconstruction={SCENE_RECONSTRUCTION_MODE} pid={os.getpid()}"
 )
 MODEL = VMemPipeline(CONFIG, DEVICE)
 NAVIGATORS = []

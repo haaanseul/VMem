@@ -56,6 +56,122 @@ We provide a demo for you to interact with `VMem`. Simply run
 python app.py
 ```
 
+## Headless revisit experiments
+
+Spatial-memory revisit failures can be tested without Gradio. Start with a
+plan-only check, which does not load the model or use the GPU:
+
+```bash
+conda activate vmem
+python scripts/run_revisit_experiment.py \
+  --scene test_samples/living_room.jpg \
+  --context-mode surfel \
+  --trajectory exact_revisit \
+  --seed 42 \
+  --memory-intervention correct \
+  --plan-only \
+  --output-dir experiments/results/plan_only
+```
+
+Remove `--plan-only` for generation. The runner supports `surfel`, `recent`,
+and `initial_only` context modes; exact/novel-angle/partial-overlap, rotation
+accumulation, and revisit-gap trajectories; and `correct`, `none`, `wrong`, or
+`correct_plus_wrong` memory interventions. See all options with:
+
+```bash
+python scripts/run_revisit_experiment.py --help
+```
+
+Controlled follow-up ablations can limit corruption to a number or explicit
+set of context slots and can independently replace latent, CLIP, or
+pose/intrinsics conditioning:
+
+```bash
+python scripts/run_revisit_experiment.py \
+  --scene test_samples/living_room.jpg \
+  --context-mode surfel \
+  --trajectory exact_revisit \
+  --memory-intervention correct_plus_wrong \
+  --intervention-components latent \
+  --wrong-slot-count 1 \
+  --output-dir experiments/results/latent_slot1
+```
+
+The bounded follow-up matrix is resumable and runs sequentially so it does not
+compete with itself for GPU memory:
+
+```bash
+python scripts/run_revisit_matrix.py \
+  --groups dose components novel partial context rotation gap contamination repro \
+  --output-dir experiments/results/overnight
+```
+
+It writes `matrix_summary.json` and `matrix_summary.csv` after every run and
+skips directories that already contain a completed `summary.json`.
+
+After the matrix completes, recompute all cross-condition statistics with:
+
+```bash
+python scripts/analyze_revisit_matrix.py \
+  --results-dir experiments/results/overnight
+```
+
+This writes `analysis.json` and `analysis.md` beside the ignored run outputs.
+
+### Long-form local cycle diagnostics
+
+The 57-run intervention matrix is intentionally a micro-ablation: most runs
+contain only 2–4 frames. Do not use its MP4 files as long-term paper
+reproductions. Use the separate long-form suite for visually meaningful local
+cycles:
+
+```bash
+python scripts/run_long_revisit_suite.py \
+  --groups yaw long \
+  --modes surfel recent \
+  --scene test_samples/oxford.jpg \
+  --output-dir experiments/results/long_cycle
+```
+
+The yaw cycle contains 127 frames. The multi-segment cycle contains 433 frames,
+uses 216 outbound frames, and then follows the exact reverse camera path. Runs
+are sequential and resumable.
+
+Compare every return frame with the frame at its matching outbound camera pose:
+
+```bash
+python scripts/analyze_long_revisit.py \
+  --results-dir experiments/results/long_cycle
+```
+
+This writes per-run `cycle_pairs.json`/`.csv`, paired contact sheets, and an
+aggregate `long_cycle_analysis.md`. These command-generated Oxford-image runs
+match the paper's qualitative sequence length and reverse-cycle concept, but
+they are not the official RealEstate10K or Tanks-and-Temples benchmark.
+
+The four retained videos, recommended viewing order, deleted smoke videos, and
+the distinction between `--plan-only` and a minimal GPU dry run are documented
+in [VIDEO_GUIDE.md](VIDEO_GUIDE.md).
+
+For a direct audit of the official GitHub/Hugging Face source path, including a
+pixel-identical 9-frame compatibility check and the official source's
+reproduced Octree crash, see
+[PAPER_DEMO_REPRODUCTION.md](PAPER_DEMO_REPRODUCTION.md). That document also
+separates this check from the official website's 5.5-second, 165-frame Oxford
+video, whose exact camera trajectory is not published. The crash-safe app can
+use the released source's full-history CUT3R write behavior with
+`VMEM_SCENE_RECONSTRUCTION_MODE=full_history`.
+
+Each run writes frames, an MP4, actual camera poses, strict JSON/JSONL memory
+traces, a summary CSV, context images, contact sheets, and a manual-label
+manifest below its `--output-dir`. Large outputs under `experiments/results/`
+are ignored by Git. The intervention is applied only during the revisit phase
+by default so outbound rollout and revisit conditioning can be separated.
+
+The paper/code comparison and experiment definitions are in
+[experiment_plan.md](experiment_plan.md). Only observations from completed
+local runs are recorded in [failure_analysis.md](failure_analysis.md).
+
 For moving this working tree to another server through GitHub, see [DEPLOYMENT.md](DEPLOYMENT.md).
 
 

@@ -132,6 +132,13 @@ class VMemPipeline:
         self.global_step = 0
         self.debug_context_history = []
         self.initial_threshold = 1.0
+        self.experiment_enabled = False
+        self.experiment_context_mode = "surfel"
+        self.experiment_memory_intervention = "correct"
+        self.experiment_intervention_active = False
+        self.experiment_intervention_components = "latent_clip"
+        self.experiment_wrong_slot_count = None
+        self.experiment_wrong_slot_indices = None
        
 
     def reset(self):
@@ -157,7 +164,52 @@ class VMemPipeline:
             return [int(i) for i in indices.tolist()]
         return [int(i) for i in indices]
 
-    def _record_context_debug(self, indices, reason, target_c2ws=None):
+    def configure_revisit_experiment(
+        self,
+        context_mode="surfel",
+        memory_intervention="correct",
+        intervention_active=False,
+        intervention_components="latent_clip",
+        wrong_slot_count=None,
+        wrong_slot_indices=None,
+    ):
+        valid_context_modes = {"surfel", "recent", "initial_only"}
+        valid_interventions = {"correct", "none", "wrong", "correct_plus_wrong"}
+        valid_components = {"latent", "clip", "latent_clip", "pose_intrinsics"}
+        if context_mode not in valid_context_modes:
+            raise ValueError(
+                f"Unknown context mode {context_mode!r}; expected one of {sorted(valid_context_modes)}"
+            )
+        if memory_intervention not in valid_interventions:
+            raise ValueError(
+                "Unknown memory intervention "
+                f"{memory_intervention!r}; expected one of {sorted(valid_interventions)}"
+            )
+        if intervention_components not in valid_components:
+            raise ValueError(
+                f"Unknown intervention components {intervention_components!r}; "
+                f"expected one of {sorted(valid_components)}"
+            )
+        if wrong_slot_count is not None and int(wrong_slot_count) < 0:
+            raise ValueError("wrong_slot_count must be non-negative")
+        self.experiment_enabled = True
+        self.experiment_context_mode = context_mode
+        self.experiment_memory_intervention = memory_intervention
+        self.experiment_intervention_active = bool(intervention_active)
+        self.experiment_intervention_components = intervention_components
+        self.experiment_wrong_slot_count = (
+            None if wrong_slot_count is None else int(wrong_slot_count)
+        )
+        self.experiment_wrong_slot_indices = (
+            None
+            if wrong_slot_indices is None
+            else [int(index) for index in wrong_slot_indices]
+        )
+
+    def set_revisit_intervention_active(self, active):
+        self.experiment_intervention_active = bool(active)
+
+    def _record_context_debug(self, indices, reason, target_c2ws=None, details=None):
         target_count = int(len(target_c2ws)) if target_c2ws is not None else None
         target_start = len(self.pil_frames)
         entry = {
@@ -173,11 +225,14 @@ class VMemPipeline:
                 if target_count is not None else None
             ),
         }
+        if details:
+            entry.update(details)
         self.debug_context_history.append(entry)
         print(
             "[context] "
             f"step={entry['generation_step']} reason={reason} "
             f"context={entry['context_time_indices']} "
+            f"content={entry.get('content_source_indices', entry['context_time_indices'])} "
             f"targets={entry['target_time_indices']} "
             f"existing={entry['num_existing_frames']} surfels={entry['num_surfels']}",
             flush=True,
@@ -579,302 +634,362 @@ class VMemPipeline:
     
     
     def get_context_info(self, target_c2ws, use_non_maximum_suppression=None):
-        """Get context information for novel view synthesis.
-        
-        Args:
-            target_c2ws: Target camera-to-world matrices
-            Ks: Camera intrinsic matrices
-            current_timestep: Current timestep (used in temporal mode)
-            
-        Returns:
-            Dictionary containing context information for the target view
+        """Select context views and optionally apply controlled revisit interventions.
+
+        Route indices supply camera poses/intrinsics. Content source indices supply
+        latents and CLIP embeddings. They are identical during normal VMem use and
+        differ only for the explicit ``wrong`` experiment conditions.
         """
-        # Function to prepare context tensors from indices
-        def prepare_context_data(indices):
-            c2ws = [self.c2ws[i] for i in indices]
-            latents = [torch.from_numpy(self.latents[i]).to(self.device, self.dtype) for i in indices]
-            embeddings = [torch.from_numpy(self.encoder_embeddings[i]).to(self.device, self.dtype) for i in indices]
-            intrinsics = [self.Ks[i] for i in indices]
-            return c2ws, latents, embeddings, intrinsics, indices
-        
-        # if self.temporal_only:
-        #     # Select frames based on timesteps (temporal mode)
-        #     context_time_indices = [len(self.c2ws) - 1 - i for i in range(self.config.model.context_num_frames) if len(self.c2ws) - 1 - i >= 0]
-        #     context_data = prepare_context_data(context_time_indices)
-        
-        # elif not self.use_surfel:
-        #     # Select frames based on camera pose distance with NMS
-        #     average_c2w = average_camera_pose(target_c2ws)
-        #     distances = torch.stack([self.geodesic_distance(torch.from_numpy(average_c2w).to(self.device, self.dtype), torch.from_numpy(np.array(c2w)).to(self.device, self.dtype), weight_translation=self.config.model.translation_distance_weight) 
-        #                  for c2w in self.c2ws])
-            
-        #     # Sort frames by distance (closest to target first)
-        #     sorted_indices = torch.argsort(distances)
-        #     max_frames = min(self.config.model.context_num_frames, len(distances), len(self.latents))
-            
-        #     # Apply non-maximum suppression to select diverse frames
-        #     is_first_step = len(self.pil_frames) <= 1
-        #     is_second_step = len(self.pil_frames) == 5
-        #     min_required_frames = 1 if is_first_step else max_frames
-            
-        #     # Adaptively determine initial threshold based on camera pose distribution
-        #     if use_non_maximum_suppression is None:
-        #         use_non_maximum_suppression = self.use_non_maximum_suppression
-                
-        #     if use_non_maximum_suppression:
-  
-        #         if is_second_step:
-        #             # Calculate pairwise distances between existing frames
-        #             pairwise_distances = []
-        #             for i in range(len(self.c2ws)):
-        #                 for j in range(i+1, len(self.c2ws)):
-        #                     sim = self.geodesic_distance(
-        #                         torch.from_numpy(np.array(self.c2ws[i])).to(self.device, self.dtype),
-        #                         torch.from_numpy(np.array(self.c2ws[j])).to(self.device, self.dtype),
-        #                         weight_translation=self.config.model.translation_distance_weight
-        #                     )
-        #                     pairwise_distances.append(sim.item())
-                    
-        #             if pairwise_distances:
-        #                 # Sort distances and take percentile as threshold
-        #                 pairwise_distances.sort()
-        #                 percentile_idx = int(len(pairwise_distances) * 0.5)  # 25th percentile
-        #                 self.initial_threshold = pairwise_distances[percentile_idx]
-                        
-        #                 # Ensure threshold is within reasonable bounds
-        #                 # initial_threshold = max(0.00, min(0.001, initial_threshold))
-        #             else:
-        #                 self.initial_threshold = 0.001
-        #         elif is_first_step:
-        #             # Default threshold for first frame
-        #             self.initial_threshold = 1e8
-        #     else:
-        #         self.initial_threshold = 1e8
-                
-        
-            
-        #     selected_indices = []
-            
-        #     # Try with increasingly relaxed thresholds until we get enough frames
-        #     current_threshold = self.initial_threshold
-        #     while len(selected_indices) < min_required_frames and current_threshold <= 1.0:
-        #         # Reset selection with new threshold
-        #         selected_indices = []
-                
-        #         # Always start with the closest pose
-        #         selected_indices.append(sorted_indices[0])
-                
-        #         # Try to add each subsequent pose in order of distance
-        #         for idx in sorted_indices[1:]:
-        #             if len(selected_indices) >= max_frames:
-        #                 break
-                        
-        #             # Check if this candidate is sufficiently different from all selected frames
-        #             is_too_similar = False
-        #             for selected_idx in selected_indices:
-        #                 similarity = self.geodesic_distance(
-        #                     torch.from_numpy(np.array(self.c2ws[idx])).to(self.device, self.dtype),
-        #                     torch.from_numpy(np.array(self.c2ws[selected_idx])).to(self.device, self.dtype),
-        #                     weight_translation=self.config.model.translation_distance_weight
-        #                 )
-        #                 if similarity < current_threshold:
-        #                     is_too_similar = True
-        #                     break
-                            
-        #             # Add to selected frames if not too similar to any existing selection
-        #             if not is_too_similar:
-        #                 selected_indices.append(idx)
-                
-        #         # If we still don't have enough frames, relax the threshold and try again
-        #         if len(selected_indices) < min_required_frames:
-        #             current_threshold *= 1.2
-        #         else:
-        #             break
-            
-        #     # If we still don't have enough frames, just take the top frames by distance
-        #     if len(selected_indices) < min_required_frames:
-        #         available_indices = []
-        #         for idx in sorted_indices:
-        #             if idx not in selected_indices:
-        #                 available_indices.append(idx)
-        #         selected_indices.extend(available_indices[:min_required_frames-len(selected_indices)])
-            
-        #     # Convert to tensor and maintain original order (don't reverse)
-        #     context_time_indices = torch.tensor(selected_indices, device=distances.device)
-        #     context_data = prepare_context_data(context_time_indices)
-        
-        # else:
-        if len(self.pil_frames) == 1:
-            context_time_indices = [0]
-            context_reason = "initial_frame"
-        else:
-            # get the average camera pose
-            average_c2w = average_camera_pose(target_c2ws[-self.config.model.context_num_frames//4:])
-            transformed_average_c2w = self.get_transformed_c2ws(average_c2w)
-            target_K = np.mean(self.surfel_Ks, axis=0)
-            # Select frames using surfel-based relevance
-            retrieved_info = self.render_surfels_to_image(
-                self.surfels,
-                transformed_average_c2w,
-                [target_K*0.65] * 2,
-                principal_points=(int(self.config.surfel.width/2), int(self.config.surfel.height/2)),
-                image_width=int(self.config.surfel.width),
-                image_height=int(self.config.surfel.height)
+        if not self.latents:
+            raise RuntimeError("Context requested before pipeline initialization")
+
+        def as_index_list(indices):
+            return self._normalize_indices_for_debug(indices)
+
+        def fill_context_slots(indices, count):
+            result = [i for i in as_index_list(indices) if 0 <= i < len(self.latents)]
+            for index in range(len(self.latents) - 1, -1, -1):
+                if len(result) >= count:
+                    break
+                if index not in result:
+                    result.append(index)
+            if not result:
+                result = [0]
+            while len(result) < count:
+                result.append(result[-1])
+            return result[:count]
+
+        def prepare_context_data(
+            route_indices, latent_source_indices, embedding_source_indices
+        ):
+            c2ws = [self.c2ws[i] for i in route_indices]
+            latents = [
+                torch.from_numpy(self.latents[i]).to(self.device, self.dtype)
+                for i in latent_source_indices
+            ]
+            embeddings = [
+                torch.from_numpy(self.encoder_embeddings[i]).to(self.device, self.dtype)
+                for i in embedding_source_indices
+            ]
+            intrinsics = [self.Ks[i] for i in route_indices]
+            return c2ws, latents, embeddings, intrinsics
+
+        target_window = target_c2ws[-max(1, self.config.model.context_num_frames // 4):]
+        average_c2w = np.asarray(average_camera_pose(target_window))
+        pose_distances = {
+            index: float(
+                self.geodesic_distance(
+                    torch.from_numpy(average_c2w).to(self.device, self.dtype),
+                    torch.from_numpy(np.asarray(c2w)).to(self.device, self.dtype),
+                    weight_translation=self.config.model.translation_distance_weight,
+                ).item()
             )
-            _, frame_count = self.process_retrieved_spatial_information(retrieved_info)
-            
-            if len(frame_count) == 0:
-                print("[get_context_info] surfel retrieval failed, falling back to recent frames")
-                max_frames = min(self.config.model.context_num_frames, len(self.latents))
-                context_time_indices = list(range(max(0, len(self.latents) - max_frames), len(self.latents)))
-                self._record_context_debug(context_time_indices, "fallback_recent_frames", target_c2ws)
-                context_data = prepare_context_data(context_time_indices)
+            for index, c2w in enumerate(self.c2ws)
+        }
 
-                (context_c2ws, context_latents, context_encoder_embeddings, context_Ks, context_time_indices) = context_data
+        desired_context_count = (
+            1 if len(self.pil_frames) == 1 else int(self.config.model.context_num_frames)
+        )
+        context_mode = self.experiment_context_mode if self.experiment_enabled else "surfel"
+        candidate_scores = {}
+        fallback_used = False
 
-                return {
-                    "context_c2ws": torch.from_numpy(np.array(context_c2ws)).to(self.device, self.dtype),
-                    "context_latents": torch.stack(context_latents).to(self.device, self.dtype),
-                    "context_encoder_embeddings": torch.stack(context_encoder_embeddings).to(self.device, self.dtype),
-                    "context_Ks": torch.from_numpy(np.array(context_Ks)).to(self.device, self.dtype),
-                    "context_time_indices": context_time_indices,
-                }
-            if self.config.inference.visualize:
-                visualize_depth(retrieved_info["depth"],
-                                visualization_dir=self.visualize_dir, 
-                                file_name=f"retrieved_depth_surfels.png",
-                                size=(self.width, self.height))
-            
-            
-            # Build candidate frames based on relevance count
-            candidates = []
-            for frame, count in frame_count:
-                candidates.extend([frame] * count)
+        if len(self.pil_frames) == 1:
+            selected_indices = [0]
+            context_reason = "initial_frame"
+        elif context_mode == "recent":
+            start = max(0, len(self.latents) - desired_context_count)
+            selected_indices = list(range(start, len(self.latents)))
+            context_reason = "temporal_recent"
+        elif context_mode == "initial_only":
+            selected_indices = [0] * desired_context_count
+            context_reason = "initial_only"
+        else:
+            timestep_weights = []
+            frame_count = []
+            if self.surfels and self.surfel_Ks:
+                transformed_average_c2w = self.get_transformed_c2ws(average_c2w)
+                target_K = np.mean(self.surfel_Ks, axis=0)
+                retrieved_info = self.render_surfels_to_image(
+                    self.surfels,
+                    transformed_average_c2w,
+                    [target_K * 0.65] * 2,
+                    principal_points=(
+                        int(self.config.surfel.width / 2),
+                        int(self.config.surfel.height / 2),
+                    ),
+                    image_width=int(self.config.surfel.width),
+                    image_height=int(self.config.surfel.height),
+                )
+                timestep_weights, frame_count = self.process_retrieved_spatial_information(
+                    retrieved_info
+                )
+                if self.config.inference.visualize:
+                    visualize_depth(
+                        retrieved_info["depth"],
+                        visualization_dir=self.visualize_dir,
+                        file_name="retrieved_depth_surfels.png",
+                        size=(self.width, self.height),
+                    )
 
-            if len(candidates) == 0:
-                print("[get_context_info] no candidates, falling back to latest frame")
-                context_time_indices = [len(self.latents) - 1]
-                self._record_context_debug(context_time_indices, "fallback_latest_frame", target_c2ws)
-                context_data = prepare_context_data(context_time_indices)
+            candidate_scores = {
+                int(index): float(score)
+                for index, score in timestep_weights
+                if 0 <= int(index) < len(self.latents)
+            }
+            candidate_instances = []
+            for index, count in frame_count:
+                index = int(index)
+                if 0 <= index < len(self.latents):
+                    candidate_instances.extend([index] * max(0, int(count)))
 
-                (context_c2ws, context_latents, context_encoder_embeddings, context_Ks, context_time_indices) = context_data
+            if not frame_count:
+                print("[get_context_info] surfel retrieval failed; using recent frames")
+                start = max(0, len(self.latents) - desired_context_count)
+                selected_indices = list(range(start, len(self.latents)))
+                context_reason = "fallback_recent_frames"
+                fallback_used = True
+            elif not candidate_instances:
+                print("[get_context_info] no candidates; using latest frame")
+                selected_indices = [len(self.latents) - 1]
+                context_reason = "fallback_latest_frame"
+                fallback_used = True
+            else:
+                sorted_frames = sorted(
+                    candidate_instances,
+                    key=lambda index: pose_distances.get(index, float("inf")),
+                )
+                max_frames = min(
+                    int(self.config.model.context_num_frames),
+                    len(sorted_frames),
+                    len(self.latents),
+                )
+                if use_non_maximum_suppression is None:
+                    use_non_maximum_suppression = self.use_non_maximum_suppression
 
-                return {
-                    "context_c2ws": torch.from_numpy(np.array(context_c2ws)).to(self.device, self.dtype),
-                    "context_latents": torch.stack(context_latents).to(self.device, self.dtype),
-                    "context_encoder_embeddings": torch.stack(context_encoder_embeddings).to(self.device, self.dtype),
-                    "context_Ks": torch.from_numpy(np.array(context_Ks)).to(self.device, self.dtype),
-                    "context_time_indices": context_time_indices,
-                }
-
-            indices_to_frame = {i: frame for i, frame in enumerate(candidates)}
-                
-            # Sort candidates by distance to target view
-            distances = [self.geodesic_distance(torch.from_numpy(average_c2w).to(self.device, self.dtype), 
-                                                torch.from_numpy(self.c2ws[frame]).to(self.device, self.dtype), 
-                                                weight_translation=self.config.model.translation_distance_weight).item() 
-                        for frame in candidates]
-            
-            sorted_indices = torch.argsort(torch.tensor(distances))
-            sorted_frames = [indices_to_frame[int(i.item())] for i in sorted_indices]
-            max_frames = min(self.config.model.context_num_frames, len(candidates), len(self.latents))
-            
-
-            is_second_step = len(self.pil_frames) == 5
-    
-            
-            # Adaptively determine initial threshold based on camera pose distribution
-            if use_non_maximum_suppression is None:
-                use_non_maximum_suppression = self.use_non_maximum_suppression
-                
-            if use_non_maximum_suppression:
-                if is_second_step:
-                    # Calculate pairwise distances between existing frames
+                if use_non_maximum_suppression and len(self.pil_frames) == 5:
                     pairwise_distances = []
                     for i in range(len(self.c2ws)):
-                        for j in range(i+1, len(self.c2ws)):
-                            sim = self.geodesic_distance(
-                                torch.from_numpy(np.array(self.c2ws[i])).to(self.device, self.dtype),
-                                torch.from_numpy(np.array(self.c2ws[j])).to(self.device, self.dtype),
-                                weight_translation=self.config.model.translation_distance_weight
+                        for j in range(i + 1, len(self.c2ws)):
+                            pairwise_distances.append(
+                                float(
+                                    self.geodesic_distance(
+                                        torch.from_numpy(np.asarray(self.c2ws[i])).to(
+                                            self.device, self.dtype
+                                        ),
+                                        torch.from_numpy(np.asarray(self.c2ws[j])).to(
+                                            self.device, self.dtype
+                                        ),
+                                        weight_translation=self.config.model.translation_distance_weight,
+                                    ).item()
+                                )
                             )
-                            pairwise_distances.append(sim.item())
-                    
-                    if pairwise_distances:
-                        # Sort distances and take percentile as threshold
-                        pairwise_distances.sort()
-                        percentile_idx = int(len(pairwise_distances) * 0.5)  # 25th percentile
-                        self.initial_threshold = pairwise_distances[percentile_idx]
-                    else:
-                        self.initial_threshold = 1
-                elif not hasattr(self, "initial_threshold"):
-                    self.initial_threshold = 1.0
+                    self.initial_threshold = (
+                        sorted(pairwise_distances)[len(pairwise_distances) // 2]
+                        if pairwise_distances
+                        else 1.0
+                    )
+                elif not use_non_maximum_suppression:
+                    self.initial_threshold = 1e8
 
-            
-                
-            else:
-                self.initial_threshold = 1e8
-            
-            selected_indices = []
-            current_threshold = self.initial_threshold
-            
-            # Always start with the closest pose
-            selected_indices.append(sorted_frames[0])
-            if not use_non_maximum_suppression:
-                selected_indices.append(len(self.c2ws) - 1)
-            
-            # Try with increasingly relaxed thresholds until we get enough frames
-            while len(selected_indices) < max_frames and current_threshold >= 1e-5 and use_non_maximum_suppression:
-                # Try to add each subsequent pose in order of distance
-                for idx in sorted_frames[1:]:
+                selected_indices = [sorted_frames[0]]
+                if not use_non_maximum_suppression:
+                    latest_index = len(self.c2ws) - 1
+                    selected_indices.append(latest_index)
+
+                current_threshold = self.initial_threshold
+                while (
+                    use_non_maximum_suppression
+                    and len(selected_indices) < max_frames
+                    and current_threshold >= 1e-5
+                ):
+                    for index in sorted_frames[1:]:
+                        if len(selected_indices) >= max_frames:
+                            break
+                        too_similar = any(
+                            float(
+                                self.geodesic_distance(
+                                    torch.from_numpy(np.asarray(self.c2ws[index])).to(
+                                        self.device, self.dtype
+                                    ),
+                                    torch.from_numpy(np.asarray(self.c2ws[selected])).to(
+                                        self.device, self.dtype
+                                    ),
+                                    weight_translation=self.config.model.translation_distance_weight,
+                                ).item()
+                            )
+                            < current_threshold
+                            for selected in selected_indices
+                        )
+                        if not too_similar:
+                            selected_indices.append(index)
+                    if len(selected_indices) < max_frames:
+                        current_threshold /= 1.2
+
+                for index in sorted_frames:
                     if len(selected_indices) >= max_frames:
                         break
-                        
-                    # Check if this candidate is sufficiently different from all selected frames
-                    is_too_similar = False
-                    for selected_idx in selected_indices:
-                        similarity = self.geodesic_distance(
-                            torch.from_numpy(np.array(self.c2ws[idx])).to(self.device, self.dtype),
-                            torch.from_numpy(np.array(self.c2ws[selected_idx])).to(self.device, self.dtype),
-                            weight_translation=self.config.model.translation_distance_weight
-                        )
-                        if similarity < current_threshold:
-                            is_too_similar = True
-                            break
-                            
-                    # Add to selected frames if not too similar to any existing selection
-                    if not is_too_similar:
-                        selected_indices.append(idx)
-                
-                # If we still don't have enough frames, relax the threshold and try again
-                if len(selected_indices) < max_frames:
-                    current_threshold /= 1.2
-                else:
-                    break
-            
-            # If we still don't have enough frames, just take the top frames by distance
-            if len(selected_indices) < max_frames:
-                available_indices = []
-                for idx in sorted_frames:
-                    if idx not in selected_indices:
-                        available_indices.append(idx)
-                selected_indices.extend(available_indices[:max_frames-len(selected_indices)])
-            
-            # Convert to tensor and maintain original order (don't reverse)
-            context_time_indices = torch.from_numpy(np.array(selected_indices))
-            context_reason = "surfel_relevance"
-        self._record_context_debug(context_time_indices, context_reason, target_c2ws)
-        context_data = prepare_context_data(context_time_indices)
-            
-        (context_c2ws, context_latents, context_encoder_embeddings, context_Ks, context_time_indices) = context_data
+                    if index not in selected_indices:
+                        selected_indices.append(index)
+                context_reason = "surfel_relevance"
 
-            
+        selected_indices = as_index_list(selected_indices)
+        if self.experiment_enabled:
+            selected_indices = fill_context_slots(
+                selected_indices, desired_context_count
+            )
+
+        pre_intervention_indices = list(selected_indices)
+        route_indices = list(selected_indices)
+        latent_source_indices = list(selected_indices)
+        embedding_source_indices = list(selected_indices)
+        corrupted_slots = []
+        active_intervention = (
+            self.experiment_memory_intervention
+            if self.experiment_enabled and self.experiment_intervention_active
+            else "correct"
+        )
+
+        if active_intervention == "none":
+            start = max(0, len(self.latents) - desired_context_count)
+            route_indices = fill_context_slots(
+                list(range(start, len(self.latents))), desired_context_count
+            )
+            latent_source_indices = list(route_indices)
+            embedding_source_indices = list(route_indices)
+            context_reason = "intervention_none_recent"
+        elif active_intervention in {"wrong", "correct_plus_wrong"}:
+            route_set = set(route_indices)
+            wrong_pool = [i for i in range(len(self.latents)) if i not in route_set]
+            if not wrong_pool:
+                wrong_pool = list(range(len(self.latents)))
+            wrong_pool.sort(
+                key=lambda index: (
+                    candidate_scores.get(index, 0.0),
+                    -pose_distances.get(index, 0.0),
+                    index,
+                )
+            )
+            wrong_sources = []
+            for position, route_index in enumerate(route_indices):
+                alternatives = [
+                    index for index in wrong_pool if index != route_index
+                ]
+                if not alternatives:
+                    alternatives = [
+                        index
+                        for index in range(len(self.latents))
+                        if index != route_index
+                    ]
+                # The very first generation has only one stored frame, so a
+                # genuinely different source does not exist yet.  Reusing it
+                # is preferable to fabricating an invalid tensor/state entry.
+                if not alternatives:
+                    alternatives = [route_index]
+                wrong_sources.append(
+                    alternatives[position % len(alternatives)]
+                )
+            if self.experiment_wrong_slot_indices is not None:
+                corrupted_slots = sorted(
+                    {
+                        position
+                        for position in self.experiment_wrong_slot_indices
+                        if 0 <= position < len(route_indices)
+                    }
+                )
+            elif self.experiment_wrong_slot_count is not None:
+                corrupted_slots = list(
+                    range(
+                        min(
+                            self.experiment_wrong_slot_count,
+                            len(route_indices),
+                        )
+                    )
+                )
+            elif active_intervention == "wrong":
+                corrupted_slots = list(range(len(route_indices)))
+            else:
+                corrupted_slots = list(range(0, len(route_indices), 2))
+
+            for position in corrupted_slots:
+                wrong_source = wrong_sources[position]
+                if self.experiment_intervention_components == "latent":
+                    latent_source_indices[position] = wrong_source
+                elif self.experiment_intervention_components == "clip":
+                    embedding_source_indices[position] = wrong_source
+                elif self.experiment_intervention_components == "latent_clip":
+                    latent_source_indices[position] = wrong_source
+                    embedding_source_indices[position] = wrong_source
+                elif self.experiment_intervention_components == "pose_intrinsics":
+                    route_indices[position] = wrong_source
+
+        if latent_source_indices == embedding_source_indices:
+            content_source_indices = list(latent_source_indices)
+        else:
+            content_source_indices = None
+        if latent_source_indices != pre_intervention_indices:
+            context_image_source_indices = list(latent_source_indices)
+        elif embedding_source_indices != pre_intervention_indices:
+            context_image_source_indices = list(embedding_source_indices)
+        else:
+            context_image_source_indices = list(pre_intervention_indices)
+
+        candidate_records = [
+            {
+                "index": int(index),
+                "surfel_relevance": (
+                    float(candidate_scores[index]) if index in candidate_scores else None
+                ),
+                "pose_distance": float(pose_distances[index]),
+            }
+            for index in sorted(
+                pose_distances,
+                key=lambda i: (-candidate_scores.get(i, 0.0), pose_distances[i]),
+            )
+        ]
+        details = {
+            "context_mode": context_mode,
+            "configured_memory_intervention": self.experiment_memory_intervention,
+            "intervention_components": self.experiment_intervention_components,
+            "active_memory_intervention": active_intervention,
+            "intervention_active": bool(self.experiment_intervention_active),
+            "configured_wrong_slot_count": self.experiment_wrong_slot_count,
+            "configured_wrong_slot_indices": self.experiment_wrong_slot_indices,
+            "corrupted_slots": corrupted_slots,
+            "fallback_used": bool(fallback_used),
+            "candidate_frames": candidate_records,
+            "pre_intervention_indices": pre_intervention_indices,
+            "route_indices": route_indices,
+            "content_source_indices": content_source_indices,
+            "latent_source_indices": latent_source_indices,
+            "embedding_source_indices": embedding_source_indices,
+            "context_image_source_indices": context_image_source_indices,
+            "target_average_pose": average_c2w.tolist(),
+        }
+        self._record_context_debug(route_indices, context_reason, target_c2ws, details)
+
+        context_c2ws, context_latents, context_encoder_embeddings, context_Ks = (
+            prepare_context_data(
+                route_indices,
+                latent_source_indices,
+                embedding_source_indices,
+            )
+        )
         return {
-            "context_c2ws": torch.from_numpy(np.array(context_c2ws)).to(self.device, self.dtype),
+            "context_c2ws": torch.from_numpy(np.asarray(context_c2ws)).to(
+                self.device, self.dtype
+            ),
             "context_latents": torch.stack(context_latents).to(self.device, self.dtype),
-            "context_encoder_embeddings": torch.stack(context_encoder_embeddings).to(self.device, self.dtype),
-            "context_Ks": torch.from_numpy(np.array(context_Ks)).to(self.device, self.dtype),
-            "context_time_indices": context_time_indices,
+            "context_encoder_embeddings": torch.stack(context_encoder_embeddings).to(
+                self.device, self.dtype
+            ),
+            "context_Ks": torch.from_numpy(np.asarray(context_Ks)).to(
+                self.device, self.dtype
+            ),
+            "context_time_indices": route_indices,
+            "content_source_indices": content_source_indices,
+            "latent_source_indices": latent_source_indices,
+            "embedding_source_indices": embedding_source_indices,
         }
 
 
@@ -1415,6 +1530,15 @@ class VMemPipeline:
             
  
             context_info = self.get_context_info(target_c2ws, use_non_maximum_suppression)
+            if self.debug_context_history:
+                trace_entry = self.debug_context_history[-1]
+                trace_entry["padded_target_count"] = int(len(target_c2ws))
+                trace_entry["real_target_count"] = int(real_target_length)
+                target_start = len(self.pil_frames)
+                trace_entry["target_count"] = int(real_target_length)
+                trace_entry["target_time_indices"] = list(
+                    range(target_start, target_start + int(real_target_length))
+                )
             
             (context_c2ws, 
              context_latents, 
@@ -1470,11 +1594,24 @@ class VMemPipeline:
             
             # Update scene reconstruction if needed
      
-            max_scene_frames = (
-                self.config.model.context_num_frames
-                + self.config.model.target_num_frames
+            scene_reconstruction_mode = self.config.inference.get(
+                "scene_reconstruction_mode",
+                "recent_window",
             )
-            scene_frames = self.pil_frames[-max_scene_frames:]
+            if scene_reconstruction_mode == "full_history":
+                scene_frames = self.pil_frames
+            elif scene_reconstruction_mode == "recent_window":
+                max_scene_frames = (
+                    self.config.model.context_num_frames
+                    + self.config.model.target_num_frames
+                )
+                scene_frames = self.pil_frames[-max_scene_frames:]
+            else:
+                raise ValueError(
+                    "inference.scene_reconstruction_mode must be "
+                    "'recent_window' or 'full_history', got "
+                    f"{scene_reconstruction_mode!r}"
+                )
             self.construct_and_store_scene(scene_frames,
                                         time_indices=context_time_indices,
                                         niter=self.config.surfel.niter, 
